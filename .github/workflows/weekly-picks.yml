@@ -8,28 +8,37 @@ on:
         description: What to run
         required: true
         options: [status, build, open, close, email_smoke]
-        default: build
+        default: status
       until:
         description: Override "until" date (YYYY-MM-DD). Blank = today (Oslo)
         required: false
         default: ""
       topk:
-        description: How many symbols to preview / email
+        description: How many symbols to show/send
         required: false
         default: "6"
+      dry_run:
+        type: boolean
+        description: Safety: use --dry-run for open/close
+        default: true
 
 jobs:
   run:
     runs-on: ubuntu-latest
+
     env:
       TZ: Europe/Oslo
+
+      # --- Secrets (set these in: Settings → Secrets and variables → Actions) ---
+      ALPACA_API_KEY_ID: ${{ secrets.ALPACA_API_KEY_ID }}
+      ALPACA_API_SECRET_KEY: ${{ secrets.ALPACA_API_SECRET_KEY }}
+      ALPACA_BASE_URL: ${{ secrets.ALPACA_BASE_URL }} # e.g. 'https://paper-api.alpaca.markets'
+      POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+
       SMTP_USER: ${{ secrets.SMTP_USER }}
       SMTP_PASS: ${{ secrets.SMTP_PASS }}
-      SMTP_TO:   ${{ secrets.SMTP_TO }}
-      SMTP_FROM: ${{ secrets.SMTP_FROM }}
-      ALPACA_API_KEY_ID:     ${{ secrets.ALPACA_API_KEY_ID }}
-      ALPACA_API_SECRET_KEY: ${{ secrets.ALPACA_API_SECRET_KEY }}
-      ALPACA_BASE_URL:       ${{ secrets.ALPACA_BASE_URL || 'https://paper-api.alpaca.markets' }}
+      SMTP_TO:   ${{ secrets.SMTP_TO }}      # comma-separated list; will be BCC’d
+      SMTP_FROM: ${{ secrets.SMTP_FROM }}    # optional; defaults to SMTP_USER if blank
 
     steps:
       - name: Checkout repo
@@ -42,47 +51,113 @@ jobs:
 
       - name: Install Python deps
         run: |
-          python -m pip install --upgrade pip
-          pip install pandas numpy pyyaml requests python-dateutil
-
-      - name: Compute UNTIL date and DRY flag
-        id: when
-        shell: python
-        run: |
-          import os, sys, datetime, zoneinfo
-          tz = zoneinfo.ZoneInfo("Europe/Oslo")
-          raw = "${{ inputs.until }}".strip()
-          if raw:
-            until = datetime.date.fromisoformat(raw)
-          else:
-            until = datetime.datetime.now(tz).date()
-          # DRY for weekends by default
-          dry = "1" if until.weekday() >= 5 else "0"
-          print(f"UNTIL={until}", file=open(os.environ["GITHUB_OUTPUT"], "a"))
-          print(f"DRY={dry}", file=open(os.environ["GITHUB_OUTPUT"], "a"))
-          print(f"TopK=${{ inputs.topk }}  Mode=${{ inputs.mode }}  Until={until}")
-
-      - name: STATUS — show inputs and time
-        if: ${{ inputs.mode == 'status' }}
-        run: |
-          echo "Mode:       ${{ inputs.mode }}"
-          echo "Until:      ${{ steps.when.outputs.UNTIL }}"
-          echo "TopK:       ${{ inputs.topk }}"
-          echo "Runner TZ:  $TZ"
+          python -m pip install --upgrade pip wheel setuptools
+          pip install pandas numpy yfinance requests pyyaml python-dateutil tqdm ta
 
       - name: Make working folders
-        if: ${{ inputs.mode == 'build' }}
         run: |
-          mkdir -p stock_data_400 backtests
+          mkdir -p stock_data_400 backtests notifications logs universe
 
-      # OPTIONAL: refresh data if you later add sync_polygon_eod.py
-      - name: Refresh weekly universe (Polygon) — optional
-        if: ${{ inputs.mode == 'build' && hashFiles('sync_polygon_eod.py') != '' }}
+      - name: STATUS — show inputs and time
+        if: ${{ github.event.inputs.mode == 'status' }}
         run: |
-          python sync_polygon_eod.py --since 2020-01-01 --until "${{ steps.when.outputs.UNTIL }}" --qps-delay 0.35
+          echo "Mode      : ${{ github.event.inputs.mode }}"
+          echo "Until     : '${{ github.event.inputs.until }}'"
+          echo "TopK      : ${{ github.event.inputs.topk }}"
+          echo "Dry-run   : ${{ github.event.inputs.dry_run }}"
+          echo "Now (Oslo): $(date +'%Y-%m-%d %H:%M:%S %Z')"
 
-      # BUILD picklist (requires build_picklist_parametric.py and CSVs in stock_data_400)
-           - name: Build picklist (RSI≥68)
+      - name: EMAIL_SMOKE — send test email (Bcc to SMTP_TO)
+        if: ${{ github.event.inputs.mode == 'email_smoke' }}
+        run: |
+          python - <<'PY'
+          import os, smtplib
+          from email.message import EmailMessage
+
+          user = os.environ["SMTP_USER"]
+          pwd  = os.environ["SMTP_PASS"]
+          bcc  = [e.strip() for e in os.environ.get("SMTP_TO","").split(",") if e.strip()]
+          if not user or not pwd or not bcc:
+              raise SystemExit("Missing SMTP_USER / SMTP_PASS / SMTP_TO")
+
+          msg = EmailMessage()
+          msg["Subject"] = "Smoke test ✉️ (GitHub Actions)"
+          sender = os.environ.get("SMTP_FROM") or user
+          msg["From"] = sender
+          # leave "To" as yourself; put real recipients in BCC
+          msg["To"] = sender
+          msg.set_content("If you received this, SMTP works. BCC list hidden by design.")
+
+          with smtplib.SMTP("smtp.office365.com", 587, timeout=30) as s:
+              s.starttls()
+              s.login(user, pwd)
+              s.send_message(msg, to_addrs=[sender], bcc_addrs=bcc)
+          print("Smoke email sent to BCC recipients.")
+          PY
+
+      - name: Compute UNTIL date and DRY flag
+        id: cfg
+        run: |
+          if [ -n "${{ github.event.inputs.until }}" ]; then
+            UNTIL="${{ github.event.inputs.until }}"
+          else
+            # today in Oslo
+            UNTIL="$(date +%F)"
+          fi
+          echo "until=$UNTIL" >> "$GITHUB_OUTPUT"
+
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            echo "dry=--dry-run" >> "$GITHUB_OUTPUT"
+          else
+            echo "dry=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Write config_highrsi.yaml
+        run: |
+          cat > config_highrsi.yaml <<'YAML'
+          # Minimal runtime config used by weekly_ops_highrsi.py in CI
+          topk: ${TOPK}
+          equity: 100000
+          stop_mult: 1.50
+          target_mult: 2.20
+          tp_mode: fixed
+          use_prevclose: true
+          data_dir: stock_data_400
+          YAML
+        env:
+          TOPK: ${{ github.event.inputs.topk }}
+
+      - name: Write config_notify.yaml
+        run: |
+          cat > config_notify.yaml <<'YAML'
+          smtp:
+            host: smtp.office365.com
+            port: 587
+            user: ${SMTP_USER}
+            password: ${SMTP_PASS}
+            from: ${SMTP_FROM:-${SMTP_USER}}
+            to: ${SMTP_TO}          # will be used as BCC (hidden)
+          email:
+            subject_prefix: "Weekly picks"
+            signoff: |
+              Good trading, very good.
+              — CEO of Kanute
+          YAML
+
+      # --- Optional data refresh (Polygon). Will not fail the job if it errors. ---
+      - name: Refresh weekly universe (Polygon)
+        if: ${{ github.event.inputs.mode == 'build' && env.POLYGON_API_KEY != '' }}
+        continue-on-error: true
+        run: |
+          cat > config_polygon.yaml <<'YAML'
+          data_dir: stock_data_400
+          api_key: ${POLYGON_API_KEY}
+          YAML
+          # Your script may require more options; this is best-effort and non-fatal.
+          python sync_polygon_eod.py --config config_polygon.yaml --since 2020-01-01 --until "${{ steps.cfg.outputs.until }}" || true
+
+      # Build only if we actually have CSVs. (hashFiles returns '' if none)
+      - name: Build picklist (RSI≥68, rank=rsi)
         if: ${{ github.event.inputs.mode == 'build' && hashFiles('stock_data_400/*.csv') != '' }}
         run: |
           python build_picklist_parametric.py \
@@ -93,88 +168,41 @@ jobs:
             --rank rsi \
             --max-ext20 0.15 \
             --top-per-week 40 \
-            $([ -n "${{ github.event.inputs.until }}" ] && echo --until ${{ github.event.inputs.until }}) \
+            --until "${{ steps.cfg.outputs.until }}" \
             --out backtests/picklist_highrsi_trend.csv
 
-      - name: Build skipped (no CSVs)
+      - name: Build skipped (no CSVs found)
         if: ${{ github.event.inputs.mode == 'build' && hashFiles('stock_data_400/*.csv') == '' }}
-        run: echo "No CSVs found in stock_data_400/*.csv — push data or adjust workflow."
+        run: echo "No CSVs in stock_data_400/*.csv — push data or enable Polygon/Yahoo step."
 
-          import os, sys, pandas as pd
-          out = "backtests/picklist_highrsi_trend.csv"
-          if not os.path.exists(out):
-            print("No picklist to preview."); sys.exit(0)
-          df = pd.read_csv(out)
-          wk = df["week_start"].max()
-          sub = df[df["week_start"]==wk].head(int("${{ inputs.topk }}"))
-          print("Week start:", wk)
-          print(sub[["symbol"]].to_string(index=False))
+      - name: Preview Top-${{ github.event.inputs.topk }}
+        if: ${{ (github.event.inputs.mode == 'build' || github.event.inputs.mode == 'status') && hashFiles('backtests/picklist_highrsi_trend.csv') != '' }}
+        run: |
+          python show_next_picks.py --picklist backtests/picklist_highrsi_trend.csv --topk ${{ github.event.inputs.topk }}
 
       - name: Email weekly picks
-        if: ${{ inputs.mode == 'build' && env.SMTP_USER && env.SMTP_PASS && env.SMTP_TO }}
-        shell: python
+        if: ${{ github.event.inputs.mode == 'build' && hashFiles('backtests/picklist_highrsi_trend.csv') != '' && env.SMTP_USER != '' }}
         run: |
-          import os, smtplib, ssl, pandas as pd
-          from email.message import EmailMessage
-          out = "backtests/picklist_highrsi_trend.csv"
-          if not os.path.exists(out):
-            print("No picklist to email."); raise SystemExit(0)
-          df = pd.read_csv(out)
-          wk = df["week_start"].max()
-          sub = df[df["week_start"]==wk].head(int("${{ inputs.topk }}"))
-          body = "Weekly picks (Top {k}) — week_start {wk}\n\n{rows}\n\nGood trading,\nCEO of Kanute".format(
-              k="${{ inputs.topk }}",
-              wk=wk,
-              rows="\n".join(f"  {i+1:>2}. {s}" for i,s in enumerate(sub["symbol"].tolist()))
-          )
-          msg = EmailMessage()
-          msg["Subject"] = f"Weekly picks — {wk}"
-          msg["From"] = os.environ.get("SMTP_FROM") or os.environ["SMTP_USER"]
-          msg["To"] = (os.environ.get("SMTP_FROM") or os.environ["SMTP_USER"])
-          # Hide recipients: put real list in BCC
-          msg.set_content(body)
-          bcc = [x.strip() for x in os.environ["SMTP_TO"].split(",") if x.strip()]
-          ctx = ssl.create_default_context()
-          with smtplib.SMTP("smtp.office365.com", 587, timeout=30) as s:
-            s.starttls(context=ctx)
-            s.login(os.environ["SMTP_USER"], os.environ["SMTP_PASS"])
-            s.send_message(msg, to_addrs=[msg["To"], *bcc])
-          print("Email sent to BCC list.")
+          python notify_picks.py --config config_notify.yaml --picklist backtests/picklist_highrsi_trend.csv --topk ${{ github.event.inputs.topk }}
 
-      - name: Upload artifacts (picklist)
-        if: ${{ inputs.mode == 'build' && exists('backtests/picklist_highrsi_trend.csv') }}
+      - name: Open positions (Top-K) LIVE
+        if: ${{ github.event.inputs.mode == 'open' }}
+        run: |
+          python weekly_ops_highrsi.py --action open --config config_highrsi.yaml ${{ steps.cfg.outputs.dry }} --timings
+
+      - name: Close positions via CLS (fallback market) LIVE
+        if: ${{ github.event.inputs.mode == 'close' }}
+        run: |
+          python weekly_ops_highrsi.py --action close --config config_highrsi.yaml --close-method cls ${{ steps.cfg.outputs.dry }} --timings
+
+      - name: Upload build artifacts
+        if: ${{ hashFiles('backtests/picklist_highrsi_trend.csv') != '' }}
         uses: actions/upload-artifact@v4
         with:
-          name: picklist
-          path: backtests/picklist_highrsi_trend.csv
-
-      # OPEN positions (optional — only if script exists)
-      - name: Open positions (Top-K) — DRY
-        if: ${{ inputs.mode == 'open' && hashFiles('weekly_ops_highrsi.py') != '' }}
-        run: |
-          python weekly_ops_highrsi.py --action open --config config_highrsi.yaml --dry-run --timings
-
-      # CLOSE positions (optional — only if script exists)
-      - name: Close positions via CLS (fallback market) — DRY
-        if: ${{ inputs.mode == 'close' && hashFiles('weekly_ops_highrsi.py') != '' }}
-        run: |
-          python weekly_ops_highrsi.py --action close --config config_highrsi.yaml --dry-run
-
-      - name: EMAIL_SMOKE — send test email (Bcc to SMTP_TO)
-        if: ${{ inputs.mode == 'email_smoke' }}
-        shell: python
-        run: |
-          import os, smtplib, ssl
-          from email.message import EmailMessage
-          msg = EmailMessage()
-          msg["Subject"] = "SMTP smoke OK"
-          msg["From"] = os.environ.get("SMTP_FROM") or os.environ["SMTP_USER"]
-          msg["To"] = msg["From"]  # self
-          msg.set_content("Hello from GitHub Actions.\nThis is a smoke test.\n")
-          bcc = [x.strip() for x in os.environ["SMTP_TO"].split(",") if x.strip()]
-          ctx = ssl.create_default_context()
-          with smtplib.SMTP("smtp.office365.com", 587, timeout=30) as s:
-            s.starttls(context=ctx)
-            s.login(os.environ["SMTP_USER"], os.environ["SMTP_PASS"])
-            s.send_message(msg, to_addrs=[msg["To"], *bcc])
-          print("Smoke email sent.")
+          name: weekly-assets
+          path: |
+            backtests/picklist_highrsi_trend.csv
+            config_highrsi.yaml
+            config_notify.yaml
+            logs/**
+            notifications/**
