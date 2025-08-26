@@ -121,17 +121,23 @@ jobs:
             signoff: |
               Good trading, very good.
               — CEO of Kanute
-          YAML
-
-      - name: Refresh weekly universe (Polygon)  # best-effort
-        if: ${{ github.event.inputs.mode == 'build' && env.POLYGON_API_KEY != '' }}
-        continue-on-error: true
+          
+      - name: Make dynamic universe
         run: |
-          cat > config_polygon.yaml <<YAML
-          data_dir: stock_data_400
-          api_key: ${POLYGON_API_KEY}
-          YAML
-          python sync_polygon_eod.py --config config_polygon.yaml --since 2020-01-01 --until "${{ steps.cfg.outputs.until }}" || true
+          python ci_make_universe.py \
+            --out-file universe/dynamic_universe.txt \
+            --max 700 \
+            --source auto
+
+                 - name: Refresh weekly universe (Polygon)
+        if: env.POLYGON_API_KEY != ''
+        run: |
+          python ci_refresh_universe.py \
+            --universe-file universe/dynamic_universe.txt \
+            --since 2020-01-01 \
+            --until "${{ env.UNTIL_DATE }}" \
+            --data-dir stock_data_400 \
+            --qps-delay 0.25
 
       - name: Build picklist (RSI≥68, rank=rsi)
         if: ${{ github.event.inputs.mode == 'build' && hashFiles('stock_data_400/*.csv') != '' }}
