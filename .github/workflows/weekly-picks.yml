@@ -47,36 +47,35 @@ jobs:
 
       - name: EMAIL_SMOKE — send test email (Bcc to SMTP_TO)
         if: ${{ inputs.mode == 'email_smoke' }}
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
         run: |
           python - << 'PY'
           import os, smtplib, ssl
           from email.message import EmailMessage
-
-          user=os.environ.get("SMTP_USER")
-          pwd =os.environ.get("SMTP_PASS")
-          to  =os.environ.get("SMTP_TO")
-          frm =os.environ.get("SMTP_FROM") or user
+          env = os.environ.get
+          user = env("SMTP_USER"); pwd = env("SMTP_PASS")
+          to   = env("SMTP_TO");   frm = env("SMTP_FROM") or user
+          host = env("SMTP_HOST") or "smtp.gmail.com"
+          port = int(env("SMTP_PORT") or 587)
 
           if not (user and pwd and to):
               raise SystemExit("Missing SMTP secrets (SMTP_USER/SMTP_PASS/SMTP_TO).")
+          print(f"SMTP host: {host}:{port}  (user domain: {user.split('@')[-1]})")
 
-          msg=EmailMessage()
-          msg["Subject"]="CI smoke test: Weekly Picks mailer"
-          msg["From"]=frm
-          msg["To"]=frm
-          msg["Bcc"]=to
-          msg.set_content("Hello!\nThis is a smoke test from GitHub Actions.\n\nIf you see this, SMTP is OK.\n")
+          msg = EmailMessage()
+          msg["Subject"] = "CI smoke test: Weekly Picks mailer"
+          msg["From"] = frm
+          msg["To"] = frm
+          msg["Bcc"] = to
+          msg.set_content("Hello!\nThis is a smoke test from GitHub Actions.\nIf you see this, SMTP is OK.\n")
 
-          # Try common ports (465 SSL, then 587 STARTTLS)
-          host="smtp.gmail.com" if user.endswith("@gmail.com") else "smtp.office365.com"
-          try:
-              with smtplib.SMTP_SSL(host,465,context=ssl.create_default_context()) as s:
-                  s.login(user,pwd); s.send_message(msg)
-                  print("Sent via SMTPS:465")
-          except Exception as e1:
-              print("465 failed:", e1, " — trying 587…")
-              with smtplib.SMTP(host,587) as s:
-                  s.starttls(context=ssl.create_default_context())
-                  s.login(user,pwd); s.send_message(msg)
-                  print("Sent via STARTTLS:587")
+          ctx = ssl.create_default_context()
+          with smtplib.SMTP(host, port, timeout=30) as s:
+              s.starttls(context=ctx)
+              s.login(user, pwd)
+              s.send_message(msg)
+              print("Sent via STARTTLS.")
           PY
+
