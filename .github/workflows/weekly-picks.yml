@@ -8,22 +8,75 @@ on:
         type: choice
         required: true
         default: status
-        options: [status, build, open, close]
+        options: [status, email_smoke]
       until:
-        description: Optional date YYYY-MM-DD
+        description: Optional YYYY-MM-DD (not used in this minimal version)
         required: false
         default: ""
       topk:
-        description: Optional number of symbols
+        description: Optional number of symbols (not used here)
         required: false
         default: "6"
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    env:
+      TZ: Europe/Oslo
+      SMTP_USER: ${{ secrets.SMTP_USER }}
+      SMTP_PASS: ${{ secrets.SMTP_PASS }}
+      SMTP_TO:   ${{ secrets.SMTP_TO }}
+      SMTP_FROM: ${{ secrets.SMTP_FROM }}
+
     steps:
-      - name: Show inputs (sanity)
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: STATUS — show inputs and time
+        if: ${{ inputs.mode == 'status' }}
         run: |
           echo "mode=${{ inputs.mode }}"
           echo "until=${{ inputs.until }}"
           echo "topk=${{ inputs.topk }}"
+          echo "date(Oslo): $(date)"
+
+      - name: EMAIL_SMOKE — send test email (Bcc to SMTP_TO)
+        if: ${{ inputs.mode == 'email_smoke' }}
+        run: |
+          python - << 'PY'
+          import os, smtplib, ssl
+          from email.message import EmailMessage
+
+          user=os.environ.get("SMTP_USER")
+          pwd =os.environ.get("SMTP_PASS")
+          to  =os.environ.get("SMTP_TO")
+          frm =os.environ.get("SMTP_FROM") or user
+
+          if not (user and pwd and to):
+              raise SystemExit("Missing SMTP secrets (SMTP_USER/SMTP_PASS/SMTP_TO).")
+
+          msg=EmailMessage()
+          msg["Subject"]="CI smoke test: Weekly Picks mailer"
+          msg["From"]=frm
+          msg["To"]=frm
+          msg["Bcc"]=to
+          msg.set_content("Hello!\nThis is a smoke test from GitHub Actions.\n\nIf you see this, SMTP is OK.\n")
+
+          # Try common ports (465 SSL, then 587 STARTTLS)
+          host="smtp.gmail.com" if user.endswith("@gmail.com") else "smtp.office365.com"
+          try:
+              with smtplib.SMTP_SSL(host,465,context=ssl.create_default_context()) as s:
+                  s.login(user,pwd); s.send_message(msg)
+                  print("Sent via SMTPS:465")
+          except Exception as e1:
+              print("465 failed:", e1, " — trying 587…")
+              with smtplib.SMTP(host,587) as s:
+                  s.starttls(context=ssl.create_default_context())
+                  s.login(user,pwd); s.send_message(msg)
+                  print("Sent via STARTTLS:587")
+          PY
