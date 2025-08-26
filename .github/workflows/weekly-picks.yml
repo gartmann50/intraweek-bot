@@ -1,204 +1,29 @@
-name: Weekly Picks & Ops
+name: Weekly Picks (manual)
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        type: choice
         description: What to run
-        options: [status, build]
+        type: choice
         required: true
-        default: build
+        default: status
+        options: [status, build, open, close]
       until:
-        description: Override “until” date (YYYY-MM-DD). Leave blank to auto-use the most recent Friday (Oslo).
+        description: Optional date YYYY-MM-DD
         required: false
         default: ""
       topk:
-        description: How many symbols to show/send
+        description: Optional number of symbols
         required: false
         default: "6"
 
 jobs:
   run:
     runs-on: ubuntu-latest
-
-    env:
-      TZ: Europe/Oslo
-
-      # Secrets expected in repo settings → Settings ▸ Secrets and variables ▸ Actions
-      ALPACA_API_KEY_ID: ${{ secrets.ALPACA_API_KEY_ID }}
-      ALPACA_API_SECRET_KEY: ${{ secrets.ALPACA_API_SECRET_KEY }}
-      ALPACA_BASE_URL: ${{ secrets.ALPACA_BASE_URL }} # e.g. https://paper-api.alpaca.markets
-
-      SMTP_USER: ${{ secrets.SMTP_USER }}
-      SMTP_PASS: ${{ secrets.SMTP_PASS }}
-      SMTP_TO:   ${{ secrets.SMTP_TO }}     # comma-separated list; we’ll send as BCC
-      SMTP_FROM: ${{ secrets.SMTP_FROM }}   # optional; falls back to SMTP_USER
-
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Install Python deps
+      - name: Show inputs (sanity)
         run: |
-          python -m pip install --upgrade pip
-          pip install pandas numpy pyyaml requests
-
-      - name: Make working folders
-        run: |
-          mkdir -p backtests
-          mkdir -p stock_data_400
-
-      # Decide which date the builder should use.
-      - name: Compute UNTIL (most recent Friday, Europe/Oslo)
-        id: until
-        env:
-          INPUT_UNTIL: ${{ github.event.inputs.until }}
-        run: |
-          python - <<'PY'
-          import os
-          from datetime import datetime, timedelta
-          try:
-              import zoneinfo
-          except Exception:
-              from backports import zoneinfo
-          u = (os.getenv("INPUT_UNTIL") or "").strip()
-          if u:
-              val = u
-          else:
-              now = datetime.now(zoneinfo.ZoneInfo("Europe/Oslo"))
-              d = now.date()
-              # most recent Friday relative to today
-              val = str(d - timedelta(days=(d.weekday()-4) % 7))
-          open(os.environ["GITHUB_OUTPUT"], "a").write(f"until={val}\n")
-          PY
-          echo "UNTIL computed: ${{ steps.until.outputs.until }}"
-
-      # ------- BUILD PICKS (RSI≥68, rank=rsi) with the minimal builder you added -------
-      # NOTE: This version of build_picklist_parametric.py supports ONLY the flags below.
-      - name: Build picklist (RSI≥68, rank=rsi)
-        if: ${{ github.event.inputs.mode == 'build' }}
-        run: |
-          python build_picklist_parametric.py \
-            --data-dir stock_data_400 \
-            --rsi-min 68 \
-            --max-ext20 0.15 \
-            --top-per-week 40 \
-            --until "${{ steps.until.outputs.until }}" \
-            --out backtests/picklist_highrsi_trend.csv
-
-      - name: Preview Top-${{ github.event.inputs.topk }}
-        run: |
-          python - <<'PY'
-          import pandas as pd, os, sys
-          topk = int(os.getenv("TOPK","6"))
-          path = "backtests/picklist_highrsi_trend.csv"
-          if not os.path.exists(path):
-              print(f"Picklist not found: {path}")
-              sys.exit(0)
-          df = pd.read_csv(path)
-          df["week_start"] = pd.to_datetime(df["week_start"]).dt.date
-          use = df["week_start"].max()
-          wk = df[df["week_start"] == use].copy()
-          if "rank" in wk.columns: wk=wk.sort_values("rank")
-          wk = wk.head(topk)
-          print(f"Week start: {use}")
-          print(wk[["rank","symbol"]].to_string(index=False))
-          PY
-        env:
-          TOPK: ${{ github.event.inputs.topk }}
-
-      # -------------------- Email weekly picks (BCC recipients) --------------------
-      - name: Email weekly picks
-        if: ${{ github.event.inputs.mode == 'build' && env.SMTP_USER != '' && env.SMTP_PASS != '' && env.SMTP_TO != '' }}
-        run: |
-          python - <<'PY'
-          import os, smtplib, ssl, pandas as pd, random
-          from email.mime.text import MIMEText
-          from email.utils import formatdate
-
-          path = "backtests/picklist_highrsi_trend.csv"
-          if not os.path.exists(path):
-              raise SystemExit("Picklist CSV not found; nothing to email.")
-
-          df = pd.read_csv(path)
-          df["week_start"] = pd.to_datetime(df["week_start"], errors="coerce").dt.date
-          week = df["week_start"].max()
-          wk = df[df["week_start"] == week].copy().sort_values("rank")
-          topk = int(os.getenv("TOPK","6"))
-          wk = wk.head(topk)
-
-          # Company name mapping if available
-          names = {}
-          if os.path.exists("symbol_names.csv"):
-              try:
-                  nd = pd.read_csv("symbol_names.csv")
-                  for _,r in nd.iterrows():
-                      sym = str(r.get("symbol") or r.get("Symbol") or "").upper().strip()
-                      nm  = str(r.get("name")   or r.get("Name")   or "").strip()
-                      if sym and nm: names[sym]=nm
-              except Exception: pass
-
-          def full(sym):
-              s = sym.split("_")[0].upper()
-              return names.get(s, s)
-
-          lines = [f"{i+1}. {full(sym)}" for i, sym in enumerate(wk["symbol"].tolist())]
-
-          # A tiny pool of verses (short to keep CI logs tidy)
-          VERSES = [
-              "New week, new tape; let patience set the pace.",
-              "Trend is the compass; risk control’s the sail.",
-              "Let entries be simple and exits be faithful.",
-              "Six names, one plan — protect the downside.",
-              "Cut the noise; follow the rules; trust the math.",
-              "Green or red, we trade the plan we said.",
-          ]
-          poem = random.choice(VERSES)
-
-          to_bcc = [t.strip() for t in (os.getenv("SMTP_TO") or "").split(",") if t.strip()]
-          sender = os.getenv("SMTP_FROM") or os.getenv("SMTP_USER")
-          subject = f"Weekly picks — {week}"
-
-          body = f"""{poem}
-
-Weekly picks (Top {topk}) — week starting {week}:
-
-""" + "\n".join(lines) + """
-
-Good trading,
-CEO of Kanute
-"""
-
-          msg = MIMEText(body, "plain", "utf-8")
-          msg["Subject"] = subject
-          msg["From"] = sender
-          # Hide recipients: send to self, BCC everyone else
-          msg["To"] = sender
-          msg["Date"] = formatdate(localtime=True)
-
-          ctx = ssl.create_default_context()
-          with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as s:
-              s.starttls(context=ctx)
-              s.login(os.getenv("SMTP_USER"), os.getenv("SMTP_PASS"))
-              s.sendmail(sender, [sender] + to_bcc, msg.as_string())
-
-          print(f"Emailed Top-{topk} for {week} to {len(to_bcc)} BCC recipient(s).")
-          PY
-        env:
-          TOPK: ${{ github.event.inputs.topk }}
-
-      - name: Upload build artifacts
-        if: ${{ github.event.inputs.mode == 'build' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: weekly-picks
-          path: |
-            backtests/picklist_highrsi_trend.csv
-            symbol_names.csv
-          if-no-files-found: warn
+          echo "mode=${{ inputs.mode }}"
+          echo "until=${{ inputs.until }}"
+          echo "topk=${{ inputs.topk }}"
