@@ -1,0 +1,10 @@
+name: Sanity Button
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "It works ✅ $(date -u)"
