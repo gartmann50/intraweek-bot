@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        type: choice
         description: What to run
+        type: choice
         required: true
-        options: [status, build, open, close, email_smoke]
-        default: status
+        default: build
+        options: [status, email_smoke, build]
       until:
         description: Override "until" (YYYY-MM-DD). Blank = today (Oslo)
         required: false
@@ -17,26 +17,18 @@ on:
         description: How many symbols to show/send
         required: false
         default: "6"
-      dry_run:
-        type: choice
-        description: Safety for open/close
-        options: ["true", "false"]
-        default: "true"
+
+env:
+  TZ: Europe/Oslo
+  POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+  SMTP_USER: ${{ secrets.SMTP_USER }}
+  SMTP_PASS: ${{ secrets.SMTP_PASS }}
+  SMTP_TO:   ${{ secrets.SMTP_TO }}
+  SMTP_FROM: ${{ secrets.SMTP_FROM }}
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    env:
-      TZ: Europe/Oslo
-      ALPACA_API_KEY_ID: ${{ secrets.ALPACA_API_KEY_ID }}
-      ALPACA_API_SECRET_KEY: ${{ secrets.ALPACA_API_SECRET_KEY }}
-      ALPACA_BASE_URL: ${{ secrets.ALPACA_BASE_URL }}
-      POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
-      SMTP_USER: ${{ secrets.SMTP_USER }}
-      SMTP_PASS: ${{ secrets.SMTP_PASS }}
-      SMTP_TO:   ${{ secrets.SMTP_TO }}
-      SMTP_FROM: ${{ secrets.SMTP_FROM }}
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -48,89 +40,87 @@ jobs:
 
       - name: Install Python deps
         run: |
-          python -m pip install --upgrade pip wheel setuptools
-          pip install pandas numpy yfinance requests pyyaml python-dateutil tqdm ta
+          python -m pip install --upgrade pip
+          pip install pandas requests pyyaml python-dateutil pytz
 
+      # -------- status / smoke-only bits --------
       - name: STATUS — show inputs and time
-        if: ${{ github.event.inputs.mode == 'status' }}
-        run: |
-          echo "Mode      : ${{ github.event.inputs.mode }}"
-          echo "Until     : '${{ github.event.inputs.until }}'"
-          echo "TopK      : ${{ github.event.inputs.topk }}"
-          echo "Dry-run   : ${{ github.event.inputs.dry_run }}"
-          echo "Now (Oslo): $(date +'%Y-%m-%d %H:%M:%S %Z')"
-
-      - name: EMAIL_SMOKE — send test email (Bcc to SMTP_TO)
-        if: ${{ github.event.inputs.mode == 'email_smoke' }}
+        if: ${{ inputs.mode == 'status' || inputs.mode == 'email_smoke' || inputs.mode == 'build' }}
         run: |
           python - <<'PY'
-          import os, smtplib
+          import os, datetime, zoneinfo
+          tz = zoneinfo.ZoneInfo(os.environ.get("TZ","UTC"))
+          print("Now:", datetime.datetime.now(tz))
+          print("Mode:", "${{ inputs.mode }}")
+          print("Until input:", "${{ inputs.until }}")
+          print("TopK:", "${{ inputs.topk }}")
+          PY
+
+      - name: EMAIL_SMOKE — send test email (Bcc to SMTP_TO)
+        if: ${{ inputs.mode == 'email_smoke' }}
+        env:
+          SMTP_HOST: smtp.office365.com
+          SMTP_PORT: "587"
+        run: |
+          python - <<'PY'
+          import os, smtplib, ssl
           from email.message import EmailMessage
-          user=os.environ["SMTP_USER"]; pwd=os.environ["SMTP_PASS"]
-          bcc=[e.strip() for e in os.environ.get("SMTP_TO","").split(",") if e.strip()]
-          if not user or not pwd or not bcc:
-              raise SystemExit("Missing SMTP_USER / SMTP_PASS / SMTP_TO")
-          sender=os.environ.get("SMTP_FROM") or user
-          msg=EmailMessage(); msg["Subject"]="Smoke test ✉️ (GitHub Actions)"; msg["From"]=sender; msg["To"]=sender
-          msg.set_content("If you received this, SMTP works. BCC list hidden.")
-          with smtplib.SMTP("smtp.office365.com",587,timeout=30) as s:
-              s.starttls(); s.login(user,pwd); s.send_message(msg, to_addrs=[sender], bcc_addrs=bcc)
+
+          user=os.environ["SMTP_USER"]; pw=os.environ["SMTP_PASS"]
+          host=os.environ.get("SMTP_HOST","smtp.office365.com")
+          port=int(os.environ.get("SMTP_PORT","587"))
+          to=os.environ["SMTP_TO"]; from_addr=os.environ.get("SMTP_FROM") or user
+
+          msg=EmailMessage()
+          msg["Subject"]="Smoke: CI can email"
+          msg["From"]=from_addr
+          msg["To"]=from_addr
+          msg["Bcc"]=to
+          msg.set_content("Hello from CI — this is a smoke test.\n")
+
+          with smtplib.SMTP(host, port, timeout=30) as s:
+            s.starttls(context=ssl.create_default_context())
+            s.login(user,pw)
+            s.send_message(msg)
           print("Smoke email sent.")
           PY
 
-      - name: Compute UNTIL date and shell flags
-        id: cfg
+      # -------- shared setup for build --------
+      - name: Compute UNTIL date and DRY flag
+        if: ${{ inputs.mode == 'build' }}
+        shell: bash
         run: |
-          if [ -n "${{ github.event.inputs.until }}" ]; then
-            UNTIL="${{ github.event.inputs.until }}"
+          set -euo pipefail
+          if [ -z "${{ inputs.until }}" ]; then
+            UNTIL=$(python - <<'PY'
+import datetime, zoneinfo
+tz = zoneinfo.ZoneInfo("Europe/Oslo")
+print(datetime.datetime.now(tz).date().isoformat())
+PY
+)
           else
-            UNTIL="$(date +%F)"
+            UNTIL="${{ inputs.until }}"
           fi
-          [ "${{ github.event.inputs.dry_run }}" = "true" ] && DRY="--dry-run" || DRY=""
-          echo "until=$UNTIL" >> $GITHUB_OUTPUT
-          echo "dry=$DRY"     >> $GITHUB_OUTPUT
+          echo "UNTIL_DATE=$UNTIL" >> $GITHUB_ENV
+          echo "DRY_RUN=1" >> $GITHUB_ENV
+          echo "TopK=${{ inputs.topk }}" >> $GITHUB_ENV
+          echo "Until=$UNTIL"
 
       - name: Ensure folders
+        if: ${{ inputs.mode == 'build' }}
         run: |
-          mkdir -p stock_data_400 backtests notifications logs universe
+          mkdir -p stock_data_400 universe backtests notifications logs
 
-      - name: Write config_highrsi.yaml
-        run: |
-          cat > config_highrsi.yaml <<YAML
-          topk: ${{ github.event.inputs.topk }}
-          equity: 100000
-          stop_mult: 1.50
-          target_mult: 2.20
-          tp_mode: fixed
-          use_prevclose: true
-          data_dir: stock_data_400
-          YAML
-
-      - name: Write config_notify.yaml
-        run: |
-          cat > config_notify.yaml <<YAML
-          smtp:
-            host: smtp.office365.com
-            port: 587
-            user: ${SMTP_USER}
-            password: ${SMTP_PASS}
-            from: ${SMTP_FROM}
-            to: ${SMTP_TO}     # used as BCC (hidden)
-          email:
-            subject_prefix: "Weekly picks"
-            signoff: |
-              Good trading, very good.
-              — CEO of Kanute
-          
       - name: Make dynamic universe
+        if: ${{ inputs.mode == 'build' }}
         run: |
           python ci_make_universe.py \
             --out-file universe/dynamic_universe.txt \
             --max 700 \
             --source auto
 
-                 - name: Refresh weekly universe (Polygon)
-        if: env.POLYGON_API_KEY != ''
+      - name: Refresh weekly universe (Polygon)
+        if: ${{ inputs.mode == 'build' && env.POLYGON_API_KEY != '' }}
         run: |
           python ci_refresh_universe.py \
             --universe-file universe/dynamic_universe.txt \
@@ -139,52 +129,40 @@ jobs:
             --data-dir stock_data_400 \
             --qps-delay 0.25
 
-      - name: Build picklist (RSI≥68, rank=rsi)
-        if: ${{ github.event.inputs.mode == 'build' && hashFiles('stock_data_400/*.csv') != '' }}
+      - name: Build picklist (RSI≥68)
+        if: ${{ inputs.mode == 'build' }}
         run: |
           python build_picklist_parametric.py \
             --data-dir stock_data_400 \
-            --since 2020-01-01 \
-            --preset classic \
             --rsi-min 68 \
-            --rank rsi \
             --max-ext20 0.15 \
             --top-per-week 40 \
-            --until "${{ steps.cfg.outputs.until }}" \
+            --until "${{ env.UNTIL_DATE }}" \
             --out backtests/picklist_highrsi_trend.csv
 
-      - name: Build skipped (no CSVs found)
-        if: ${{ github.event.inputs.mode == 'build' && hashFiles('stock_data_400/*.csv') == '' }}
-        run: echo "No CSVs in stock_data_400/*.csv — push data or enable Polygon step."
-
-      - name: Preview Top-${{ github.event.inputs.topk }}
-        if: ${{ (github.event.inputs.mode == 'build' || github.event.inputs.mode == 'status') && hashFiles('backtests/picklist_highrsi_trend.csv') != '' }}
+      - name: Preview Top-${{ env.TopK }}
+        if: ${{ inputs.mode == 'build' }}
         run: |
-          python show_next_picks.py --picklist backtests/picklist_highrsi_trend.csv --topk ${{ github.event.inputs.topk }}
+          python show_next_picks.py --picklist backtests/picklist_highrsi_trend.csv --topk ${{ env.TopK }}
+
+      - name: Write config_notify.yaml
+        if: ${{ inputs.mode == 'build' }}
+        run: |
+          cat > config_notify.yaml <<'YAML'
+          smtp:
+            host: smtp.office365.com
+            port: 587
+            user: "${{ secrets.SMTP_USER }}"
+            password: "${{ secrets.SMTP_PASS }}"
+            from: "${{ secrets.SMTP_FROM }}"
+            to: "${{ secrets.SMTP_TO }}"
+          email:
+            subject_prefix: "Weekly picks"
+            signoff: "Good trading,\nCEO of Kanute"
+          YAML
+          sed -n '1,999p' config_notify.yaml
 
       - name: Email weekly picks
-        if: ${{ github.event.inputs.mode == 'build' && hashFiles('backtests/picklist_highrsi_trend.csv') != '' && env.SMTP_USER != '' }}
+        if: ${{ inputs.mode == 'build' }}
         run: |
-          python notify_picks.py --config config_notify.yaml --picklist backtests/picklist_highrsi_trend.csv --topk ${{ github.event.inputs.topk }}
-
-      - name: Open positions (Top-K)
-        if: ${{ github.event.inputs.mode == 'open' }}
-        run: |
-          python weekly_ops_highrsi.py --action open --config config_highrsi.yaml ${{ steps.cfg.outputs.dry }} --timings
-
-      - name: Close positions (CLS; fallback market)
-        if: ${{ github.event.inputs.mode == 'close' }}
-        run: |
-          python weekly_ops_highrsi.py --action close --config config_highrsi.yaml --close-method cls ${{ steps.cfg.outputs.dry }} --timings
-
-      - name: Upload build artifacts
-        if: ${{ hashFiles('backtests/picklist_highrsi_trend.csv') != '' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: weekly-assets
-          path: |
-            backtests/picklist_highrsi_trend.csv
-            config_highrsi.yaml
-            config_notify.yaml
-            logs/**
-            notifications/**
+          python notify_picks.py --config config_notify.yaml --picklist backtests/picklist_highrsi_trend.csv --topk ${{ env.TopK }}
