@@ -1,1 +1,140 @@
+name: Weekly Picks & Ops
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        type: choice
+        description: What to run
+        required: true
+        options: [status, build, open, close]
+        default: status
+      until:
+        description: Override "until" date (YYYY-MM-DD). Leave blank for today (Oslo).
+        required: false
+        default: ""
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Europe/Oslo
+      # secrets provided in repo settings
+      ALPACA_API_KEY_ID: ${{ secrets.ALPACA_API_KEY_ID }}
+      ALPACA_API_SECRET_KEY: ${{ secrets.ALPACA_API_SECRET_KEY }}
+      ALPACA_BASE_URL: ${{ secrets.ALPAcA_BASE_URL || 'https://paper-api.alpaca.markets' }}
+      SMTP_USER: ${{ secrets.SMTP_USER }}
+      SMTP_PASS: ${{ secrets.SMTP_PASS }}
+      SMTP_TO:   ${{ secrets.SMTP_TO }}
+      POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy pyyaml requests python-dateutil alpaca-trade-api
+
+      - name: Write config files from secrets
+        run: |
+          cat > config_highrsi.yaml <<'EOF'
+          alpaca:
+            api_key_id: "${ALPACA_API_KEY_ID}"
+            secret_key: "${ALPACA_API_SECRET_KEY}"
+            base_url:   "${ALPACA_BASE_URL}"
+          data_dir: stock_data_400
+          topk: 6
+          stop_mult: 1.75
+          target_mult: 4.0
+          tp_mode: fixed
+          use_prevclose: true
+          anchor_levels: entry
+          min_notional: 0
+          picklist_path: backtests/picklist_highrsi_trend.csv
+          close:
+            method: cls
+            cutoff_et: "15:50"
+            fallback: market
+          EOF
+
+          cat > config_notify.yaml <<'EOF'
+          smtp:
+            user: "${SMTP_USER}"
+            password: "${SMTP_PASS}"
+            server: "smtp.gmail.com"
+            port: 587
+          recipients_bcc:
+            - ${SMTP_TO}
+          subject: "Weekly picks"
+          EOF
+
+          if [ -n "${POLYGON_API_KEY}" ]; then
+            cat > config_polygon.yaml <<'EOF'
+            polygon:
+              api_key: "${POLYGON_API_KEY}"
+            data_dir: stock_data_400
+            universe_file: tickers/top400.txt
+            qps_delay: 0.35
+            EOF
+          fi
+
+      - name: Doctor • Alpaca & SMTP
+        run: |
+          python alpaca_doctor_ci.py --config config_highrsi.yaml
+        continue-on-error: false
+
+      # Optional: sync data if POLYGON_API_KEY and tickers exist in repo
+      - name: Sync EOD from Polygon (optional)
+        if: ${{ inputs.mode == 'build' && hashFiles('config_polygon.yaml') != '' && hashFiles('tickers/top400.txt') != '' }}
+        run: |
+          echo "Syncing EOD…"
+          python sync_polygon_eod.py --config config_polygon.yaml --since 2020-01-01 --until "${{ inputs.until }}"
+
+      - name: Build picklist (classic RSI 68 / top-per-week 40)
+        if: ${{ inputs.mode == 'build' }}
+        run: |
+          python build_picklist_parametric.py --config config_highrsi.yaml \
+            --since 2020-01-01 --until "${{ inputs.until }}" \
+            --preset classic --rsi-min 68 --rank rsi --max-ext20 0.15 --top-per-week 40 \
+            --out backtests/picklist_highrsi_trend.csv
+
+      - name: Show next picks
+        if: ${{ inputs.mode == 'build' || inputs.mode == 'status' }}
+        run: |
+          python show_next_picks.py --picklist backtests/picklist_highrsi_trend.csv --topk 6 || true
+
+      - name: Notify picks by email
+        if: ${{ inputs.mode == 'build' }}
+        run: |
+          python notify_picks.py --config config_notify.yaml --picklist backtests/picklist_highrsi_trend.csv --topk 6
+
+      - name: Open (place Monday orders)
+        if: ${{ inputs.mode == 'open' }}
+        run: |
+          python weekly_ops_highrsi.py --action open --config config_highrsi.yaml
+
+      - name: Close (Friday close method)
+        if: ${{ inputs.mode == 'close' }}
+        run: |
+          python weekly_ops_highrsi.py --action close --config config_highrsi.yaml --close-method cls
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: run-artifacts
+          path: |
+            backtests/**/*.csv
+            backtests/**/*.json
+            backtests/**/*.txt
+            config_*.yaml
+            logs/**/*.log
+          if-no-files-found: ignore
 
