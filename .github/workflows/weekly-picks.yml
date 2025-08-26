@@ -82,25 +82,24 @@ jobs:
           python sync_polygon_eod.py --since 2020-01-01 --until "${{ steps.when.outputs.UNTIL }}" --qps-delay 0.35
 
       # BUILD picklist (requires build_picklist_parametric.py and CSVs in stock_data_400)
-      - name: Build picklist (RSI≥68)
-        if: ${{ inputs.mode == 'build' && hashFiles('build_picklist_parametric.py') != '' }}
+           - name: Build picklist (RSI≥68)
+        if: ${{ github.event.inputs.mode == 'build' && hashFiles('stock_data_400/*.csv') != '' }}
         run: |
-          if [ -z "$(ls -1 stock_data_400/*.csv 2>/dev/null)" ]; then
-            echo "::warning::No CSVs in stock_data_400 — skipping build (add data or a data sync step)."
-            exit 0
-          fi
           python build_picklist_parametric.py \
             --data-dir stock_data_400 \
-            --out backtests/picklist_highrsi_trend.csv \
+            --since 2020-01-01 \
+            --preset classic \
             --rsi-min 68 \
+            --rank rsi \
             --max-ext20 0.15 \
             --top-per-week 40 \
-            --until "${{ steps.when.outputs.UNTIL }}"
+            $([ -n "${{ github.event.inputs.until }}" ] && echo --until ${{ github.event.inputs.until }}) \
+            --out backtests/picklist_highrsi_trend.csv
 
-      - name: Preview Top-${{ inputs.topk }}
-        if: ${{ inputs.mode == 'build' }}
-        shell: python
-        run: |
+      - name: Build skipped (no CSVs)
+        if: ${{ github.event.inputs.mode == 'build' && hashFiles('stock_data_400/*.csv') == '' }}
+        run: echo "No CSVs found in stock_data_400/*.csv — push data or adjust workflow."
+
           import os, sys, pandas as pd
           out = "backtests/picklist_highrsi_trend.csv"
           if not os.path.exists(out):
