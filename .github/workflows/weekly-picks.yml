@@ -109,75 +109,90 @@ jobs:
 
       # ----- INLINE PREVIEW (no external script needed) -----
       - name: Preview Top-6 (inline)
-        if: ${{ github.event.inputs.mode == 'build' }}
-        continue-on-error: true
         shell: bash
         run: |
           python - <<'PY'
-          import os, pandas as pd, numpy as np, sys
-          path = 'backtests/picklist_highrsi_trend.csv'
-          topk = int(os.environ.get('TOPK','6'))
-          until = os.environ.get('UNTIL','')
-          if not os.path.exists(path):
-              print(f"[Preview] Picklist not found: {path}")
-              sys.exit(0)
+          import pandas as pd
+          from datetime import datetime, timezone, date
+          from pathlib import Path
+          import os, sys
 
-          df = pd.read_csv(path)
-          if df.empty:
-              print(f"[Preview] Picklist is empty: {path}")
-              sys.exit(0)
+          PICKLIST = os.environ.get("PICKLIST", "backtests/picklist_highrsi_trend.csv")
+          TOPK = int(os.environ.get("TOPK", "6"))
+          # If your workflow computes UNTIL (e.g., YYYY-MM-DD for Oslo “today”), we’ll use it;
+          # otherwise we fallback to local “today”.
+          UNTIL = os.environ.get("UNTIL", "")
 
-          # normalize columns
-          df.columns = [c.strip().lower() for c in df.columns]
-          wk_candidates = ['week_start','week_start_date','weekstart','week']
-          wkcol = next((c for c in wk_candidates if c in df.columns), None)
-          if not wkcol:
-              print(f"[Preview] No week column found (tried {wk_candidates}). Columns: {list(df.columns)}")
-              sys.exit(0)
+    def today_local() -> date:
+        return datetime.now(timezone.utc).astimezone().date()
 
-          # try parsing; if nothing parses, fall back to string comparison
-          s = pd.to_datetime(df[wkcol], errors='coerce')
-          if s.notna().any():
-              df['_wk'] = s
-              try:
-                  until_dt = pd.to_datetime(until) if until else df['_wk'].max()
-              except Exception:
-                  until_dt = df['_wk'].max()
-              latest = df.loc[df['_wk'] <= until_dt, '_wk'].max()
-              sub = df[df['_wk'] == latest].copy() if pd.notna(latest) else pd.DataFrame()
-          else:
-              # fallback: compare by canonical YYYY-MM-DD string
-              ss = df[wkcol].astype(str).str.slice(0,10)
-              latest_s = ss.max()
-              df['_wkstr'] = ss
-              sub = df[df['_wkstr'] == latest_s].copy()
+    def choose_week(ws, override):
+        if override:
+            try:
+                want = pd.to_datetime(override, errors="raise").date()
+            except Exception:
+                return None
+              return want if want in set(ws) else None
+             t = today_local()
+             future = ws[ws >= t]
+        if len(future):
+            return min(future)
+            past = ws[ws <= t]
+            return max(past) if len(past) else None
 
-          if sub.empty:
-              print(f"[Preview] No rows matched by week <= {until} (or latest week).")
-              # Show available weeks to help debugging
-              sample = df[wkcol].astype(str).str.slice(0,10).value_counts().head(10)
-              print("[Preview] Available week labels (top 10):")
-              print(sample.to_string())
-              sys.exit(0)
+    p = Path(PICKLIST)
+    if not p.exists():
+        print(f"::warning::Picklist not found: {p}")
+        sys.exit(0)
 
-          # rank/score ordering
-          order_cols = [c for c in ('rank','score') if c in sub.columns]
-          if 'rank' in sub.columns:
-              sub = sub.sort_values('rank', ascending=True)
-          elif 'score' in sub.columns:
-              sub = sub.sort_values('score', ascending=False)
+    df_raw = pd.read_csv(p)
+    if "week_start" not in df_raw.columns:
+        print("::warning::Picklist missing 'week_start' column")
+        sys.exit(0)
 
-          cols = ['symbol'] + [c for c in ('rank','score') if c in sub.columns]
-          top = sub.head(topk)
-          # derive display of the week we picked
-          chosen_week = None
-          if '_wk' in top.columns and top['_wk'].notna().any():
-              chosen_week = top['_wk'].iloc[0]
-          elif '_wkstr' in top.columns:
-              chosen_week = top['_wkstr'].iloc[0]
-          print(f"Week preview: {str(chosen_week)[:10]} | Top-{topk}")
-          print(top[cols].to_string(index=False))
-          PY
+    df = df_raw.copy()
+    df["week_start_date"] = pd.to_datetime(df["week_start"], errors="coerce").dt.date
+    ws = df["week_start_date"].dropna()
+    if ws.empty:
+        print("::warning::No valid dates in week_start")
+        sys.exit(0)
+
+    wk = choose_week(ws, UNTIL)
+    if wk is None:
+        print(f"::warning::Could not choose a week. Last few weeks: {sorted(set(ws))[-10:]}")
+        sys.exit(0)
+
+    block = df[df["week_start_date"] == wk].copy()
+    if block.empty:
+        print(f"::warning::No rows for week_start={wk}")
+        sys.exit(0)
+
+    sym_col = "symbol" if "symbol" in block.columns else ("ticker" if "ticker" in block.columns else None)
+    if not sym_col:
+        print("::warning::Picklist needs 'symbol' or 'ticker' column")
+        sys.exit(0)
+
+    # Sort by rank (asc) if present, else by score (desc) if present
+    if "rank" in block.columns:
+        block = block.sort_values("rank", ascending=True)
+    elif "score" in block.columns:
+        block = block.sort_values("score", ascending=False)
+
+    top = [str(x).strip().upper() for x in block[sym_col].head(TOPK).tolist()]
+    print(f"\n=== Weekly picks — week of {wk} ===")
+    if not top:
+        print("::warning::Top-K list is empty after filtering/sorting.")
+        sys.exit(0)
+
+    for i, s in enumerate(top, 1):
+        print(f"{i:>2}. {s}")
+    print(f"\nCSV: {','.join(top)}\n")
+    PY
+  env:
+    PICKLIST: backtests/picklist_highrsi_trend.csv
+    TOPK: ${{ inputs.topk || '6' }}
+    # If your workflow already computes an UNTIL date, pass it:
+    UNTIL: ${{ steps.until.outputs.date || '' }}
 
 
       - name: EMAIL_SMOKE — send test email (Bcc to SMTP_TO)
