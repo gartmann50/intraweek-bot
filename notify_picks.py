@@ -66,15 +66,25 @@ def load_picklist(path: Path) -> Optional[pd.DataFrame]:
     return df
 
 
-def choose_target_week(df: pd.DataFrame) -> Optional[date]:
-    if df is None or df.empty:
-        return None
-    today = datetime.now(timezone.utc).astimezone().date()
-    candidates = ws[ws >= today]
-    if not candidates.empty:
-        return candidates.min()
-    candidates = ws[ws <= today]
-    return candidates.max() if not candidates.empty else None
+    def normalize_week_column(df: pd.DataFrame) -> pd.DataFrame:
+        """Return a copy with df['week_start_date'] as plain date objects."""
+        out = df.copy()
+        out["week_start_date"] = pd.to_datetime(out["week_start"], errors="coerce").dt.date
+    return out
+
+    def choose_target_week_from(df: pd.DataFrame, today: date | None = None) -> date | None:
+      """Pick the week we should email: first future week if present, else latest past."""
+    if today is None:
+        today = datetime.now(timezone.utc).astimezone().date()
+    ws = df["week_start_date"].dropna()
+
+    future = ws[ws >= today]
+    if not future.empty:
+        return future.min()
+
+    past = ws[ws <= today]
+    return past.max() if not past.empty else None
+
 
 
 def load_symbol_names() -> dict[str, str]:
