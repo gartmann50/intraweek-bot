@@ -207,7 +207,16 @@ jobs:
           PY
 
       - name: Email weekly picks
-        if: ${{ github.event.inputs.mode == 'build' }}
-        shell: bash
+  # only send on a build/open/close run; keep if-condition you already use
+        if: ${{ github.event.inputs.mode == 'build' || startsWith(github.event.inputs.mode, 'open_') || startsWith(github.event.inputs.mode, 'close') }}
+        env:
+    # feed secrets to the script via environment (no need for a config file)
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_TO:   ${{ secrets.SMTP_TO }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          TOPK:      ${{ github.event.inputs.topk || '6' }}
         run: |
-          python notify_picks.py --config config_notify.yaml --picklist backtests/picklist_highrsi_trend.csv --topk "${TOPK}"
+          python notify_picks.py \
+            --picklist backtests/picklist_highrsi_trend.csv \
+            --topk "${TOPK}"
