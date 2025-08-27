@@ -4,163 +4,189 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "What to run"
-        type: choice
+        description: What to run
         required: true
-        default: build
-        options: [status, email_smoke, build]
+        type: choice
+        default: status
+        options: [status, build, open, close, email_smoke]
       until:
-        description: "Override until (YYYY-MM-DD). Blank = today (Oslo)"
+        description: Override "until" date (YYYY-MM-DD). Blank = today (Oslo)
         required: false
         default: ""
       topk:
-        description: "How many symbols to show/send"
+        description: How many symbols to show/send
         required: false
         default: "6"
-
-env:
-  TZ: Europe/Oslo
-  POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
-  SMTP_USER: ${{ secrets.SMTP_USER }}
-  SMTP_PASS: ${{ secrets.SMTP_PASS }}
-  SMTP_TO:   ${{ secrets.SMTP_TO }}
-  SMTP_FROM: ${{ secrets.SMTP_FROM }}
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    env:
+      TZ: Europe/Oslo
+      # Secrets (set these in Settings → Secrets and variables → Actions)
+      ALPACA_API_KEY_ID: ${{ secrets.ALPACA_API_KEY_ID }}
+      ALPACA_API_SECRET_KEY: ${{ secrets.ALPACA_API_SECRET_KEY }}
+      ALPACA_BASE_URL: ${{ secrets.ALPACA_BASE_URL || 'https://paper-api.alpaca.markets' }}
+      POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+      SMTP_USER: ${{ secrets.SMTP_USER }}
+      SMTP_PASS: ${{ secrets.SMTP_PASS }}
+      SMTP_TO:   ${{ secrets.SMTP_TO }}
+      SMTP_FROM: ${{ secrets.SMTP_FROM }}
+
     steps:
-      - name: "Checkout repo"
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: "Set up Python"
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
-      - name: "Install Python deps"
+      - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
-          pip install pandas requests pyyaml python-dateutil pytz
+          pip install pandas numpy pyyaml requests python-dateutil
 
-      - name: "STATUS show inputs and time"
-        if: ${{ inputs.mode == 'status' || inputs.mode == 'email_smoke' || inputs.mode == 'build' }}
+      - name: STATUS — show inputs and time
         run: |
-          python - <<'PY'
-          import os, datetime, zoneinfo
-          tz = zoneinfo.ZoneInfo(os.environ.get("TZ","UTC"))
-          print("Now:", datetime.datetime.now(tz))
-          print("Mode:", "${{ inputs.mode }}")
-          print("Until input:", "${{ inputs.until }}")
-          print("TopK:", "${{ inputs.topk }}")
-          PY
+          echo "mode:  ${{ inputs.mode }}"
+          echo "until: ${{ inputs.until }}"
+          echo "topk:  ${{ inputs.topk }}"
+          date
 
-      - name: "EMAIL_SMOKE send test email"
-        if: ${{ inputs.mode == 'email_smoke' }}
-        env:
-          SMTP_HOST: smtp.office365.com
-          SMTP_PORT: "587"
-        run: |
-          python - <<'PY'
-          import os, smtplib, ssl
-          from email.message import EmailMessage
-
-          user=os.environ["SMTP_USER"]; pw=os.environ["SMTP_PASS"]
-          host=os.environ.get("SMTP_HOST","smtp.office365.com")
-          port=int(os.environ.get("SMTP_PORT","587"))
-          to=os.environ["SMTP_TO"]; from_addr=os.environ.get("SMTP_FROM") or user
-
-          msg=EmailMessage()
-          msg["Subject"]="Smoke: CI can email"
-          msg["From"]=from_addr
-          msg["To"]=from_addr
-          msg["Bcc"]=to
-          msg.set_content("Hello from CI — this is a smoke test.\n")
-
-          with smtplib.SMTP(host, port, timeout=30) as s:
-            s.starttls(context=ssl.create_default_context())
-            s.login(user,pw)
-            s.send_message(msg)
-          print("Smoke email sent.")
-          PY
-
-      - name: "Compute UNTIL date and DRY flag"
-        if: ${{ inputs.mode == 'build' }}
+      - name: Compute UNTIL date and DRY flag
+        id: when
         shell: bash
         run: |
-          set -euo pipefail
-          if [ -z "${{ inputs.until }}" ]; then
-            UNTIL=$(python - <<'PY'
-import datetime, zoneinfo
-tz = zoneinfo.ZoneInfo("Europe/Oslo")
-print(datetime.datetime.now(tz).date().isoformat())
-PY
-)
-          else
+          if [[ -n "${{ inputs.until }}" ]]; then
             UNTIL="${{ inputs.until }}"
+          else
+            UNTIL="$(TZ=Europe/Oslo date +%F)"
           fi
-          echo "UNTIL_DATE=$UNTIL" >> "$GITHUB_ENV"
-          echo "DRY_RUN=1" >> "$GITHUB_ENV"
-          echo "TopK=${{ inputs.topk }}" >> "$GITHUB_ENV"
-          echo "Until=$UNTIL"
+          echo "until=$UNTIL" >> "$GITHUB_OUTPUT"
+          if [[ "${{ inputs.mode }}" == "open" || "${{ inputs.mode }}" == "close" ]]; then
+            echo "dry=no" >> "$GITHUB_OUTPUT"
+          else
+            echo "dry=yes" >> "$GITHUB_OUTPUT"
+          fi
+          echo "UNTIL: $UNTIL  DRY: $(cat $GITHUB_OUTPUT | sed -n 's/^dry=//p')"
 
-      - name: "Ensure folders"
-        if: ${{ inputs.mode == 'build' }}
+      - name: Ensure folders
         run: |
-          mkdir -p stock_data_400 universe backtests notifications logs
+          mkdir -p universe backtests stock_data_400 notifications
 
-      - name: "Make dynamic universe"
-        if: ${{ inputs.mode == 'build' }}
+      # Optional: pull a fresh symbol universe from Polygon (names only).
+      # This does NOT download price history; it just writes universe/polygon_universe.csv
+      - name: Refresh weekly universe (Polygon)
+        if: ${{ inputs.mode != 'status' && env.POLYGON_API_KEY != '' }}
+        env:
+          POLYGON_API_KEY: ${{ env.POLYGON_API_KEY }}
         run: |
-          python ci_make_universe.py \
-            --out-file universe/dynamic_universe.txt \
-            --max 700 \
-            --source auto
+          python - <<'PY'
+          import os, requests, pandas as pd
+          key = os.environ.get("POLYGON_API_KEY","")
+          if not key:
+              print("No POLYGON_API_KEY; skipping.")
+              raise SystemExit(0)
+          url = f"https://api.polygon.io/v3/reference/tickers?market=stocks&active=true&limit=1000&apiKey={key}"
+          syms=[]
+          while url:
+              r = requests.get(url, timeout=30)
+              r.raise_for_status()
+              data = r.json()
+              for t in data.get("results", []):
+                  ex = (t.get("primary_exchange") or "").upper()
+                  if ex in ("NYSE","NASDAQ","AMEX"):
+                      s = t.get("ticker","")
+                      if s.isupper() and s.isalpha() and 1 <= len(s) <= 5:
+                          syms.append(s)
+              url = data.get("next_url")
+              if url and "apiKey=" not in url:
+                  url += f"&apiKey={key}"
+          syms = sorted(set(syms))
+          pd.DataFrame({"symbol": syms}).to_csv("universe/polygon_universe.csv", index=False)
+          print("Universe size:", len(syms))
+          PY
 
-      - name: "Refresh weekly universe (Polygon)"
-        if: ${{ inputs.mode == 'build' && env.POLYGON_API_KEY }}
+      - name: Write config_highrsi.yaml
         run: |
-          python ci_refresh_universe.py \
-            --universe-file universe/dynamic_universe.txt \
-            --since 2020-01-01 \
-            --until "${{ env.UNTIL_DATE }}" \
-            --data-dir stock_data_400 \
-            --qps-delay 0.25
+          cat > config_highrsi.yaml <<'YAML'
+          data_dir: stock_data_400
+          until: "${{ steps.when.outputs.until }}"
+          rsi_min: 68
+          rank: rsi
+          max_ext20: 0.15
+          top_per_week: 40
+          topk: ${{ inputs.topk }}
+          YAML
 
-      - name: "Build picklist RSI>=68 rank=rsi"
-        if: ${{ inputs.mode == 'build' }}
-        run: |
-          python build_picklist_parametric.py \
-            --data-dir stock_data_400 \
-            --rsi-min 68 \
-            --max-ext20 0.15 \
-            --top-per-week 40 \
-            --until "${{ env.UNTIL_DATE }}" \
-            --out backtests/picklist_highrsi_trend.csv
-
-      - name: "Preview TopK"
-        if: ${{ inputs.mode == 'build' }}
-        run: |
-          python show_next_picks.py --picklist backtests/picklist_highrsi_trend.csv --topk "${{ env.TopK }}"
-
-      - name: "Write config_notify.yaml"
-        if: ${{ inputs.mode == 'build' }}
+      - name: Write config_notify.yaml
         run: |
           cat > config_notify.yaml <<'YAML'
           smtp:
-            host: smtp.office365.com
-            port: 587
-            user: "${{ secrets.SMTP_USER }}"
-            password: "${{ secrets.SMTP_PASS }}"
-            from: "${{ secrets.SMTP_FROM }}"
-            to: "${{ secrets.SMTP_TO }}"
-          email:
-            subject_prefix: "Weekly picks"
-            signoff: "Good trading,\nCEO of Kanute"
+            user: "${{ env.SMTP_USER }}"
+            password: "${{ env.SMTP_PASS }}"
+            to: "${{ env.SMTP_TO }}"
+            from: "${{ env.SMTP_FROM }}"
+          footer: |
+            Good trading — very good.
+            CEO of Kanute
+          subject_prefix: "Weekly picks"
           YAML
-          sed -n '1,999p' config_notify.yaml
 
-      - name: "Email weekly picks"
+      - name: EMAIL_SMOKE — send test email (Bcc to SMTP_TO)
+        if: ${{ inputs.mode == 'email_smoke' }}
+        env:
+          SMTP_USER: ${{ env.SMTP_USER }}
+          SMTP_PASS: ${{ env.SMTP_PASS }}
+          SMTP_TO:   ${{ env.SMTP_TO }}
+          SMTP_FROM: ${{ env.SMTP_FROM }}
+        run: |
+          python - <<'PY'
+          import os, smtplib
+          u=os.environ["SMTP_USER"]; p=os.environ["SMTP_PASS"]
+          to=os.environ["SMTP_TO"]; sender=os.environ.get("SMTP_FROM",u)
+          msg=("From: %s\r\nTo: %s\r\nBcc: %s\r\nSubject: Smoke test\r\n\r\n"
+               "This is a smoke test from GitHub Actions.\r\n") % (sender, sender, to)
+          with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as s:
+              s.starttls(); s.login(u, p); s.sendmail(sender, [sender]+to.split(","), msg)
+          print("Smoke email sent.")
+          PY
+
+      - name: Build picklist (RSI≥68, rank=rsi)
+        if: ${{ inputs.mode == 'build' }}
+        # NOTE: this expects your repo to already contain CSVs in stock_data_400/.
+        # If you want the runner to download history from Polygon too, tell me and
+        # I’ll add a (heavier) sync step.
+        run: |
+          if [[ "${{ steps.when.outputs.until }}" == "" ]]; then echo "No UNTIL"; exit 1; fi
+          python build_picklist_parametric.py \
+            --data-dir stock_data_400 \
+            --out backtests/picklist_highrsi_trend.csv \
+            --since 2020-01-01 \
+            --preset classic \
+            --rsi-min 68 \
+            --rank rsi \
+            --max-ext20 0.15 \
+            --top-per-week 40 \
+            --until "${{ steps.when.outputs.until }}"
+
+      - name: Preview Top-${{ inputs.topk }}
         if: ${{ inputs.mode == 'build' }}
         run: |
-          python notify_picks.py --config config_notify.yaml --picklist backtests/picklist_highrsi_trend.csv --topk "${{ env.TopK }}"
+          python show_next_picks.py --picklist backtests/picklist_highrsi_trend.csv --topk ${{ inputs.topk }}
+
+      - name: Email weekly picks
+        if: ${{ inputs.mode == 'build' }}
+        run: |
+          python notify_picks.py --config config_notify.yaml --picklist backtests/picklist_highrsi_trend.csv --topk ${{ inputs.topk }}
+
+      - name: Open positions (Top-K) LIVE
+        if: ${{ inputs.mode == 'open' }}
+        run: |
+          python weekly_ops_highrsi.py --action open --config config_highrsi.yaml
+
+      - name: Close positions (CLS; fallback market) LIVE
+        if: ${{ inputs.mode == 'close' }}
+        run: |
+          python weekly_ops_highrsi.py --action close --config config_highrsi.yaml
