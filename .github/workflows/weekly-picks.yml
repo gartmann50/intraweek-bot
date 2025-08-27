@@ -83,14 +83,15 @@ jobs:
           python show_next_picks.py --picklist backtests/picklist_highrsi_trend.csv --topk 6 || true
 
       - name: Build weekly picklist (RSI≥68, rank=rsi, max_ext20=0.15, Top-40/wk)
-        if: ${{ github.event.inputs.mode == 'build' || startsWith(github.event.inputs.mode, 'open_') || github.event.inputs.mode == 'email_smoke' }}
-        run: |
-          python build_picklist_parametric.py \
-            --config config_highrsi.yaml \
-            --since 2020-01-01 \
-            --until "${{ steps.dates.outputs.until }}" \
-            --preset classic --rsi-min 68 --rank rsi --max-ext20 0.15 --top-per-week 40 \
-            --out backtests/picklist_highrsi_trend.csv
+  run: |
+    python build_picklist_parametric.py \
+      --data-dir stock_data_400 \
+      --out backtests/picklist_highrsi_trend.csv \
+      --rsi-min 68 \
+      --max-ext20 0.15 \
+      --top-per-week 40 \
+      --until "${{ env.UNTIL }}"
+
 
       - name: Refresh company names (for nicer emails)
         if: ${{ github.event.inputs.mode == 'build' || startsWith(github.event.inputs.mode, 'open_') || github.event.inputs.mode == 'email_smoke' }}
