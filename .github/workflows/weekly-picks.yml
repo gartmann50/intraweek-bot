@@ -4,17 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: What to run
+        description: "What to run"
         type: choice
         required: true
         default: build
         options: [status, email_smoke, build]
       until:
-        description: Override "until" (YYYY-MM-DD). Blank = today (Oslo)
+        description: "Override until (YYYY-MM-DD). Blank = today (Oslo)"
         required: false
         default: ""
       topk:
-        description: How many symbols to show/send
+        description: "How many symbols to show/send"
         required: false
         default: "6"
 
@@ -30,21 +30,20 @@ jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo
+      - name: "Checkout repo"
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: "Set up Python"
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      - name: Install Python deps
+      - name: "Install Python deps"
         run: |
           python -m pip install --upgrade pip
           pip install pandas requests pyyaml python-dateutil pytz
 
-      # -------- status / smoke-only bits --------
-      - name: STATUS — show inputs and time
+      - name: "STATUS show inputs and time"
         if: ${{ inputs.mode == 'status' || inputs.mode == 'email_smoke' || inputs.mode == 'build' }}
         run: |
           python - <<'PY'
@@ -56,7 +55,7 @@ jobs:
           print("TopK:", "${{ inputs.topk }}")
           PY
 
-      - name: EMAIL_SMOKE — send test email (Bcc to SMTP_TO)
+      - name: "EMAIL_SMOKE send test email"
         if: ${{ inputs.mode == 'email_smoke' }}
         env:
           SMTP_HOST: smtp.office365.com
@@ -85,8 +84,7 @@ jobs:
           print("Smoke email sent.")
           PY
 
-      # -------- shared setup for build --------
-      - name: Compute UNTIL date and DRY flag
+      - name: "Compute UNTIL date and DRY flag"
         if: ${{ inputs.mode == 'build' }}
         shell: bash
         run: |
@@ -101,17 +99,17 @@ PY
           else
             UNTIL="${{ inputs.until }}"
           fi
-          echo "UNTIL_DATE=$UNTIL" >> $GITHUB_ENV
-          echo "DRY_RUN=1" >> $GITHUB_ENV
-          echo "TopK=${{ inputs.topk }}" >> $GITHUB_ENV
+          echo "UNTIL_DATE=$UNTIL" >> "$GITHUB_ENV"
+          echo "DRY_RUN=1" >> "$GITHUB_ENV"
+          echo "TopK=${{ inputs.topk }}" >> "$GITHUB_ENV"
           echo "Until=$UNTIL"
 
-      - name: Ensure folders
+      - name: "Ensure folders"
         if: ${{ inputs.mode == 'build' }}
         run: |
           mkdir -p stock_data_400 universe backtests notifications logs
 
-      - name: Make dynamic universe
+      - name: "Make dynamic universe"
         if: ${{ inputs.mode == 'build' }}
         run: |
           python ci_make_universe.py \
@@ -119,8 +117,8 @@ PY
             --max 700 \
             --source auto
 
-      - name: Refresh weekly universe (Polygon)
-        if: ${{ inputs.mode == 'build' && env.POLYGON_API_KEY != '' }}
+      - name: "Refresh weekly universe (Polygon)"
+        if: ${{ inputs.mode == 'build' && env.POLYGON_API_KEY }}
         run: |
           python ci_refresh_universe.py \
             --universe-file universe/dynamic_universe.txt \
@@ -129,7 +127,7 @@ PY
             --data-dir stock_data_400 \
             --qps-delay 0.25
 
-      - name: Build picklist (RSI≥68)
+      - name: "Build picklist RSI>=68 rank=rsi"
         if: ${{ inputs.mode == 'build' }}
         run: |
           python build_picklist_parametric.py \
@@ -140,12 +138,12 @@ PY
             --until "${{ env.UNTIL_DATE }}" \
             --out backtests/picklist_highrsi_trend.csv
 
-      - name: Preview Top-${{ env.TopK }}
+      - name: "Preview TopK"
         if: ${{ inputs.mode == 'build' }}
         run: |
-          python show_next_picks.py --picklist backtests/picklist_highrsi_trend.csv --topk ${{ env.TopK }}
+          python show_next_picks.py --picklist backtests/picklist_highrsi_trend.csv --topk "${{ env.TopK }}"
 
-      - name: Write config_notify.yaml
+      - name: "Write config_notify.yaml"
         if: ${{ inputs.mode == 'build' }}
         run: |
           cat > config_notify.yaml <<'YAML'
@@ -162,7 +160,7 @@ PY
           YAML
           sed -n '1,999p' config_notify.yaml
 
-      - name: Email weekly picks
+      - name: "Email weekly picks"
         if: ${{ inputs.mode == 'build' }}
         run: |
-          python notify_picks.py --config config_notify.yaml --picklist backtests/picklist_highrsi_trend.csv --topk ${{ env.TopK }}
+          python notify_picks.py --config config_notify.yaml --picklist backtests/picklist_highrsi_trend.csv --topk "${{ env.TopK }}"
