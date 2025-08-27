@@ -110,40 +110,75 @@ jobs:
       # ----- INLINE PREVIEW (no external script needed) -----
       - name: Preview Top-6 (inline)
         if: ${{ github.event.inputs.mode == 'build' }}
+        continue-on-error: true
         shell: bash
         run: |
           python - <<'PY'
-          import os, pandas as pd, numpy as np
+          import os, pandas as pd, numpy as np, sys
           path = 'backtests/picklist_highrsi_trend.csv'
           topk = int(os.environ.get('TOPK','6'))
-          until = os.environ['UNTIL']
+          until = os.environ.get('UNTIL','')
           if not os.path.exists(path):
-              raise SystemExit(f"Picklist not found: {path}")
+              print(f"[Preview] Picklist not found: {path}")
+              sys.exit(0)
+
           df = pd.read_csv(path)
-          # normalize column names
+          if df.empty:
+              print(f"[Preview] Picklist is empty: {path}")
+              sys.exit(0)
+
+          # normalize columns
           df.columns = [c.strip().lower() for c in df.columns]
-          if 'week_start' not in df.columns:
-              if 'week_start_date' in df.columns:
-                  df.rename(columns={'week_start_date':'week_start'}, inplace=True)
-              else:
-                  raise SystemExit("CSV missing 'week_start' column.")
-          if 'symbol' not in df.columns:
-              raise SystemExit("CSV missing 'symbol' column.")
-          df['week_start'] = pd.to_datetime(df['week_start'], errors='coerce', utc=False)
-          df = df.dropna(subset=['week_start'])
-          until_dt = pd.to_datetime(until)
-          latest = df.loc[df['week_start']<=until_dt, 'week_start'].max()
-          if pd.isna(latest):
-              raise SystemExit(f"No rows for week_start <= {until} in {path}")
-          sub = df[df['week_start']==latest].copy()
+          wk_candidates = ['week_start','week_start_date','weekstart','week']
+          wkcol = next((c for c in wk_candidates if c in df.columns), None)
+          if not wkcol:
+              print(f"[Preview] No week column found (tried {wk_candidates}). Columns: {list(df.columns)}")
+              sys.exit(0)
+
+          # try parsing; if nothing parses, fall back to string comparison
+          s = pd.to_datetime(df[wkcol], errors='coerce')
+          if s.notna().any():
+              df['_wk'] = s
+              try:
+                  until_dt = pd.to_datetime(until) if until else df['_wk'].max()
+              except Exception:
+                  until_dt = df['_wk'].max()
+              latest = df.loc[df['_wk'] <= until_dt, '_wk'].max()
+              sub = df[df['_wk'] == latest].copy() if pd.notna(latest) else pd.DataFrame()
+          else:
+              # fallback: compare by canonical YYYY-MM-DD string
+              ss = df[wkcol].astype(str).str.slice(0,10)
+              latest_s = ss.max()
+              df['_wkstr'] = ss
+              sub = df[df['_wkstr'] == latest_s].copy()
+
+          if sub.empty:
+              print(f"[Preview] No rows matched by week <= {until} (or latest week).")
+              # Show available weeks to help debugging
+              sample = df[wkcol].astype(str).str.slice(0,10).value_counts().head(10)
+              print("[Preview] Available week labels (top 10):")
+              print(sample.to_string())
+              sys.exit(0)
+
+          # rank/score ordering
+          order_cols = [c for c in ('rank','score') if c in sub.columns]
           if 'rank' in sub.columns:
               sub = sub.sort_values('rank', ascending=True)
           elif 'score' in sub.columns:
               sub = sub.sort_values('score', ascending=False)
-          out = sub.head(topk)[['symbol'] + [c for c in ('rank','score') if c in sub.columns]]
-          print(f"Week start: {latest.date()} | Top-{topk}")
-          print(out.to_string(index=False))
+
+          cols = ['symbol'] + [c for c in ('rank','score') if c in sub.columns]
+          top = sub.head(topk)
+          # derive display of the week we picked
+          chosen_week = None
+          if '_wk' in top.columns and top['_wk'].notna().any():
+              chosen_week = top['_wk'].iloc[0]
+          elif '_wkstr' in top.columns:
+              chosen_week = top['_wkstr'].iloc[0]
+          print(f"Week preview: {str(chosen_week)[:10]} | Top-{topk}")
+          print(top[cols].to_string(index=False))
           PY
+
 
       - name: EMAIL_SMOKE — send test email (Bcc to SMTP_TO)
         if: ${{ github.event.inputs.mode == 'email_smoke' }}
