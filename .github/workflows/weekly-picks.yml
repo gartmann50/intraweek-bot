@@ -1,154 +1,180 @@
-name: Weekly Picks
+name: Weekly Picks (manual)
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "Choose action: status, build, open_dry, open_live, close_dry, close_live, email_smoke"
-        required: true
-        default: "status"
+        description: What to run
         type: choice
-        options:
-          - status
-          - build
-          - open_dry
-          - open_live
-          - close_dry
-          - close_live
-          - email_smoke
+        required: true
+        options: [status, build, open, close, email_smoke]
+        default: status
       until:
-        description: "YYYY-MM-DD to build up to (Oslo date). Leave blank to auto use last Friday."
+        description: Override "until" date (YYYY-MM-DD). Blank = today (Oslo)
         required: false
         default: ""
+      topk:
+        description: How many symbols to show/send
+        required: false
+        default: "6"
+      dry:
+        description: Use --dry-run for open/close
+        type: boolean
+        required: false
+        default: true
 
 jobs:
-  weekly:
+  run:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
     env:
-      # Secrets for mail & Alpaca
-      GMAIL_USER: ${{ secrets.GMAIL_USER }}
-      GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-      RECIPIENTS: ${{ secrets.RECIPIENTS }}
-      ALPACA_API_KEY_ID: ${{ secrets.ALPACA_API_KEY_ID }}
+      TZ: Europe/Oslo
+
+      # Email secrets (optional unless you use build/email_smoke)
+      SMTP_USER: ${{ secrets.SMTP_USER }}
+      SMTP_PASS: ${{ secrets.SMTP_PASS }}
+      SMTP_TO:   ${{ secrets.SMTP_TO }}
+      SMTP_FROM: ${{ secrets.SMTP_FROM }}
+      SMTP_HOST: ${{ secrets.SMTP_HOST || 'smtp.gmail.com' }}
+      SMTP_PORT: ${{ secrets.SMTP_PORT || '587' }}
+
+      # Alpaca (optional unless you use open/close)
+      ALPACA_API_KEY_ID:     ${{ secrets.ALPACA_API_KEY_ID }}
       ALPACA_API_SECRET_KEY: ${{ secrets.ALPACA_API_SECRET_KEY }}
-      ALPACA_BASE_URL: ${{ secrets.ALPACA_BASE_URL }}
+      ALPACA_BASE_URL:       ${{ secrets.ALPACA_BASE_URL }}
 
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+            python-version: '3.11'
 
-      - name: Install dependencies
+      - name: Install Python deps
         run: |
-          python -m pip install -U pip
-          pip install pandas numpy pyyaml alpaca-trade-api pytz
+          python -m pip install --upgrade pip
+          pip install pandas numpy PyYAML requests pytz
 
-      - name: Compute UNTIL date (most recent Friday in Oslo if empty)
-        id: dates
-        shell: python
+      - name: STATUS — show inputs and time
         run: |
-          import os, json
-          from datetime import datetime, timedelta
-          from zoneinfo import ZoneInfo
-          until = "${{ github.event.inputs.until }}".strip()
-          if not until:
-            now_oslo = datetime.now(ZoneInfo("Europe/Oslo")).date()
-            d = now_oslo
-            while d.weekday() != 4:  # Friday
-              d -= timedelta(days=1)
-            until = d.isoformat()
-          print("UNTIL=", until)
-          with open(os.environ['GITHUB_OUTPUT'], "a") as fh:
-            fh.write(f"until={until}\n")
+          echo "mode   = ${{ github.event.inputs.mode }}"
+          echo "until  = '${{ github.event.inputs.until }}'"
+          echo "topk   = ${{ github.event.inputs.topk }}"
+          echo "dry    = ${{ github.event.inputs.dry }}"
+          date +"Runner time: %Y-%m-%d %H:%M:%S %Z"
+          echo "CSV count in stock_data_400:"
+          ls -1 stock_data_400/*.csv 2>/dev/null | wc -l
 
-      - name: Write config_notify.yaml from secrets (runner only)
+      - name: Compute UNTIL date and flags
+        id: flags
+        shell: bash
         run: |
-          cat > config_notify.yaml <<'YAML'
-          email:
-            user: "${GMAIL_USER}"
-            app_password: "${GMAIL_APP_PASSWORD}"
-            recipients_bcc: "${RECIPIENTS}"
-            subject_prefix: "Weekly picks"
-          YAML
-          echo "Wrote config_notify.yaml"
-
-      - name: Status (list top 6 for latest week)  # safe, no trading
-        if: ${{ github.event.inputs.mode == 'status' }}
-        run: |
-          python show_next_picks.py --picklist backtests/picklist_highrsi_trend.csv --topk 6 || true
-
-     - name: Build weekly picklist (RSI≥68, max_ext20=0.15, Top-40/wk)
-    shell: bash
-    run: |
-    python build_picklist_parametric.py \
-      --data-dir stock_data_400 \
-      --out backtests/picklist_highrsi_trend.csv \
-      --rsi-min 68 \
-      --max-ext20 0.15 \
-      --top-per-week 40 \
-      --until "${{ env.UNTIL }}"
-
-
-      - name: Refresh company names (for nicer emails)
-        if: ${{ github.event.inputs.mode == 'build' || startsWith(github.event.inputs.mode, 'open_') || github.event.inputs.mode == 'email_smoke' }}
-        run: |
-          python refresh_symbol_names.py || true
-
-      - name: Email picks (smoke -> no poem; build -> full poem & names)
-        if: ${{ github.event.inputs.mode == 'email_smoke' || github.event.inputs.mode == 'build' }}
-        run: |
-          if [ "${{ github.event.inputs.mode }}" = "email_smoke" ]; then
-            python notify_picks.py --config config_notify.yaml --picklist backtests/picklist_highrsi_trend.csv --topk 6 --no-poem
+          # UNTIL date
+          if [[ -n "${{ github.event.inputs.until }}" ]]; then
+            UNTIL="${{ github.event.inputs.until }}"
           else
-            python notify_picks.py --config config_notify.yaml --picklist backtests/picklist_highrsi_trend.csv --topk 6
+            UNTIL="$(TZ="Europe/Oslo" date +%F)"
+          fi
+          echo "UNTIL=$UNTIL" | tee -a $GITHUB_ENV
+
+          # TOPK for later steps
+          echo "TOPK=${{ github.event.inputs.topk }}" >> $GITHUB_ENV
+
+          # DRY flag for open/close
+          if [[ "${{ github.event.inputs.dry }}" == "true" ]]; then
+            echo "DRY=--dry-run" >> $GITHUB_ENV
+          else
+            echo "DRY=" >> $GITHUB_ENV
           fi
 
-      - name: Write live config for Alpaca (runner only)
-        if: ${{ startsWith(github.event.inputs.mode, 'open_') || startsWith(github.event.inputs.mode, 'close_') }}
+      - name: Ensure folders
         run: |
-          cat > config_live.yaml <<'YAML'
-          alpaca:
-            api_key_id: "${ALPACA_API_KEY_ID}"
-            secret_key: "${ALPACA_API_SECRET_KEY}"
-            base_url: "${ALPACA_BASE_URL}"
-          data_dir: stock_data_400
-          topk: 6
-          sizing: fixed_fraction_equal_weight
-          stop_mult: 1.75
-          target_mult: 4.0
-          tp_mode: fixed
-          use_prevclose: true
-          anchor_levels: entry
-          min_notional: 0
-          picklist_path: backtests/picklist_highrsi_trend.csv
-          close:
-            method: cls
-            cutoff_et: "15:50"
-            fallback: market
-          YAML
-          echo "Wrote config_live.yaml"
+          mkdir -p backtests notifications out
 
-      - name: Open (DRY)
-        if: ${{ github.event.inputs.mode == 'open_dry' }}
+      - name: Write config_notify.yaml (from secrets)
+        # Needed for build/email steps
         run: |
-          python weekly_ops_highrsi.py --action open --config config_live.yaml --dry-run
+          cat > config_notify.yaml <<EOF
+          smtp:
+            user: "${SMTP_USER}"
+            password: "${SMTP_PASS}"
+            host: "${SMTP_HOST}"
+            port: ${SMTP_PORT}
+            to: "${SMTP_TO}"
+            from: "${SMTP_FROM:-$SMTP_USER}"
+          email:
+            subject_prefix: "Weekly picks"
+            signoff: |
+              Good trading — very good.
+              CEO of Kanute
+          EOF
+          echo "Wrote config_notify.yaml"
 
-      - name: Open (LIVE)
-        if: ${{ github.event.inputs.mode == 'open_live' }}
+      # ---------- Email smoke (optional) ----------
+      - name: EMAIL_SMOKE — send test email (Bcc to SMTP_TO)
+        if: ${{ github.event.inputs.mode == 'email_smoke' }}
         run: |
-          python weekly_ops_highrsi.py --action open --config config_live.yaml
+          python - << 'PY'
+          import os, smtplib
+          host = os.environ['SMTP_HOST']; port = int(os.environ['SMTP_PORT'])
+          user = os.environ['SMTP_USER']; pw = os.environ['SMTP_PASS']
+          to   = [a.strip() for a in os.environ['SMTP_TO'].split(',') if a.strip()]
+          from_addr = os.environ.get('SMTP_FROM') or user
+          msg = f"Subject: Smoke OK - Weekly Picks CI\n\nRun {os.environ.get('GITHUB_RUN_ID')}"
+          with smtplib.SMTP(host, port, timeout=30) as s:
+              s.starttls(); s.login(user, pw); s.sendmail(from_addr, to, msg)
+          print("Smoke test email sent to:", ", ".join(to))
+          PY
 
-      - name: Close (DRY)
-        if: ${{ github.event.inputs.mode == 'close_dry' }}
+      # ---------- BUILD picklist ----------
+      - name: Build weekly picklist (RSI≥68, rank=rsi, max_ext20=0.15, Top-40/wk)
+        if: ${{ github.event.inputs.mode == 'build' || github.event.inputs.mode == 'open' || github.event.inputs.mode == 'close' }}
+        shell: bash
         run: |
-          python weekly_ops_highrsi.py --action close --config config_live.yaml --close-method cls --dry-run
+          python build_picklist_parametric.py \
+            --data-dir stock_data_400 \
+            --out backtests/picklist_highrsi_trend.csv \
+            --rsi-min 68 \
+            --max-ext20 0.15 \
+            --top-per-week 40 \
+            --until "${{ env.UNTIL }}"
 
-      - name: Close (LIVE)
-        if: ${{ github.event.inputs.mode == 'close_live' }}
+      - name: Preview Top-${{ env.TOPK }}
+        if: ${{ github.event.inputs.mode == 'build' || github.event.inputs.mode == 'open' || github.event.inputs.mode == 'close' }}
+        shell: bash
         run: |
-          python weekly_ops_highrsi.py --action close --config config_live.yaml --close-method cls
+          python show_next_picks.py \
+            --picklist backtests/picklist_highrsi_trend.csv \
+            --topk "${{ env.TOPK }}"
+
+      - name: Email weekly picks
+        if: ${{ github.event.inputs.mode == 'build' }}
+        shell: bash
+        run: |
+          python notify_picks.py \
+            --config config_notify.yaml \
+            --picklist backtests/picklist_highrsi_trend.csv \
+            --topk "${{ env.TOPK }}"
+
+      # ---------- OPEN / CLOSE (optional) ----------
+      - name: Open positions (Top-K)  — ${{ env.DRY }}
+        if: ${{ github.event.inputs.mode == 'open' }}
+        shell: bash
+        run: |
+          python weekly_ops_highrsi.py \
+            --action open \
+            --config config_highrsi.yaml \
+            ${{ env.DRY }} \
+            --timings
+
+      - name: Close positions (CLS; fallback market) — ${{ env.DRY }}
+        if: ${{ github.event.inputs.mode == 'close' }}
+        shell: bash
+        run: |
+          python weekly_ops_highrsi.py \
+            --action close \
+            --config config_highrsi.yaml \
+            --close-method cls \
+            ${{ env.DRY }} \
+            --timings
