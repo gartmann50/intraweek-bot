@@ -1,162 +1,158 @@
 #!/usr/bin/env python3
-from __future__ import annotations
-import argparse
-import os
-import smtplib
-import ssl
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
+import argparse, os, sys
 from pathlib import Path
-from typing import Optional
-
+from datetime import datetime, timezone
 import pandas as pd
 import yaml
+import smtplib
+from email.message import EmailMessage
 
-# ----------------- utils
+def load_cfg(path: Path) -> dict:
+    if path and path.exists():
+        cfg = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    else:
+        cfg = {}
+    # env fallbacks (useful on GitHub)
+    cfg.setdefault("smtp", {})
+    s = cfg["smtp"]
+    s.setdefault("user", os.getenv("SMTP_USER", ""))
+    s.setdefault("pass", os.getenv("SMTP_PASS", ""))
+    s.setdefault("to",   os.getenv("SMTP_TO", ""))
+    s.setdefault("from", os.getenv("SMTP_FROM", s.get("user","")))
+    s.setdefault("host", os.getenv("SMTP_HOST", "smtp.gmail.com"))
+    s.setdefault("port", int(os.getenv("SMTP_PORT", "587")))
+    # normalize list of recipients
+    if isinstance(s["to"], str):
+        s["to"] = [e.strip() for e in s["to"].split(",") if e.strip()]
+    return cfg
 
-def read_yaml_safe(path: Path) -> dict:
-    if path.exists():
-        return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+def load_picklist(path: Path) -> pd.DataFrame | None:
+    if not path.exists():
+        print(f"ERROR: picklist not found: {path}", file=sys.stderr)
+        return None
+    df = pd.read_csv(path)
+    if df.empty:
+        print("DEBUG: picklist CSV has headers but no rows.")
+        return pd.DataFrame()  # empty on purpose
+    # normalize columns
+    cols = {c.lower(): c for c in df.columns}
+    ws_col = cols.get("week_start") or cols.get("weekstart") or cols.get("week")
+    if not ws_col:
+        print("WARN: no 'week_start' column in picklist; columns:", list(df.columns))
+        return pd.DataFrame()
+    df["week_start"] = pd.to_datetime(df[ws_col], errors="coerce", utc=True).dt.date
+    # keep only rows with valid dates
+    df = df[pd.notna(df["week_start"])]
+    # standardize symbol col
+    sym_col = cols.get("symbol") or cols.get("ticker") or cols.get("symbols")
+    if sym_col and sym_col != "symbol":
+        df = df.rename(columns={sym_col: "symbol"})
+    if "symbol" not in df.columns:
+        print("WARN: no 'symbol' column in picklist; columns:", list(df.columns))
+        return pd.DataFrame()
+    return df
+
+def choose_target_week(df: pd.DataFrame) -> datetime.date | None:
+    if df is None or df.empty:
+        return None
+    today_oslo = datetime.now(timezone.utc).astimezone().date()
+    # target the most recent week_start <= today (Oslo date)
+    candidates = df.loc[df["week_start"] <= today_oslo, "week_start"]
+    if candidates.empty:
+        return None
+    return candidates.max()
+
+def load_symbol_names() -> dict:
+    # optional file created by your workflow step
+    for p in [Path("symbol_names.csv"), Path("notifications/symbol_names.csv")]:
+        if p.exists():
+            try:
+                d = pd.read_csv(p)
+                if "symbol" in d.columns and "name" in d.columns:
+                    return dict(zip(d["symbol"], d["name"]))
+            except Exception:
+                pass
     return {}
 
-def normalize_columns(cols) -> list[str]:
-    out = []
-    for c in cols:
-        c = str(c).replace("\ufeff", "")  # strip BOM if it leaked into header
-        c = c.strip().lower().replace(" ", "_").replace("-", "_")
-        out.append(c)
-    return out
+def format_lines(symbols:list[str], name_map:dict) -> str:
+    lines = []
+    for i, sym in enumerate(symbols, 1):
+        full = name_map.get(sym, "")
+        if full:
+            lines.append(f"{i:>2}. {sym} — {full}")
+        else:
+            lines.append(f"{i:>2}. {sym}")
+    return "\n".join(lines)
 
-def find_week_column(df: pd.DataFrame) -> str:
-    # check normalized names
-    for cand in ("week_start", "weekstart", "week", "start_week"):
-        if cand in df.columns:
-            return cand
-    raise ValueError(f"Could not find a 'week_start' column. Columns: {list(df.columns)}")
-
-def robust_parse_week_start(raw: pd.Series) -> pd.Series:
-    s = raw.astype(str).str.replace("\ufeff", "", regex=False).str.strip()
-    # first pass
-    dt = pd.to_datetime(s, errors="coerce", utc=True)
-    if dt.notna().any():
-        return dt.tz_localize(None)
-    # second pass: extract YYYY-MM-DD
-    extracted = s.str.extract(r"(\d{4}-\d{2}-\d{2})", expand=False)
-    dt2 = pd.to_datetime(extracted, errors="coerce", utc=True)
-    return dt2.tz_localize(None)
-
-def load_picklist(path: Path) -> pd.DataFrame:
-    if not path.exists():
-        raise FileNotFoundError(f"Picklist not found: {path}")
-
-    # Auto-detect delimiter + handle BOM safely
-    df = pd.read_csv(path, encoding="utf-8-sig", sep=None, engine="python")
-    df.columns = normalize_columns(df.columns)
-
-    wk = find_week_column(df)
-    df["week_start"] = robust_parse_week_start(df[wk])
-
-    if df["week_start"].notna().sum() == 0:
-        # diagnostics to help us see what's in the file
-        print("DEBUG: head(5) of raw file:")
-        try:
-            print(df.head(5).to_string(index=False))
-        except Exception:
-            pass
-        print("DEBUG: sample of raw week_start column values:")
-        try:
-            print(df[wk].astype(str).head(10).to_list())
-        except Exception:
-            pass
-        raise ValueError("Could not parse any valid dates from week_start in picklist.")
-    # keep relevant cols if present
-    keep = ["week_start"]
-    for extra in ("symbol", "rank", "score"):
-        if extra in df.columns:
-            keep.append(extra)
-    return df[keep].copy()
-
-def pick_target_week(df: pd.DataFrame, week_override: Optional[str]) -> pd.Timestamp:
-    if week_override:
-        w = pd.to_datetime(str(week_override), errors="coerce")
-        if pd.isna(w):
-            raise ValueError(f"Could not parse --week '{week_override}'")
-        return w.normalize()
-    return df["week_start"].max()
-
-def build_email_html(week: str, symbols: list[str]) -> str:
-    items = "".join(f"<li>{sym}</li>" for sym in symbols)
-    return f"""
-    <html>
-      <body style="font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;color:#111;">
-        <h2 style="margin:0 0 .2rem 0;">Weekly Picks</h2>
-        <div style="margin:0 0 1rem;color:#666;">Week start: <b>{week}</b></div>
-        <ol>{items}</ol>
-        <p style="margin-top:1.2rem;">Good trading — very good!<br/>CEO of Kanute</p>
-      </body>
-    </html>
-    """.strip()
-
-def send_email(user: str, password: str, to_list: list[str], subject: str, html_body: str, from_addr: Optional[str] = None):
-    if not from_addr:
-        from_addr = user
-    msg = MIMEMultipart("alternative")
+def send_email(cfg:dict, subject:str, body:str):
+    s = cfg["smtp"]
+    required = [s.get("user"), s.get("pass"), s.get("to")]
+    if not all(required) or not s["to"]:
+        raise SystemExit("Missing SMTP settings in config_notify.yaml (or env).")
+    msg = EmailMessage()
     msg["Subject"] = subject
-    msg["From"] = from_addr
-    msg["To"] = from_addr  # we Bcc recipients
-
-    msg.attach(MIMEText(html_body, "html"))
-
-    ctx = ssl.create_default_context()
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, context=ctx) as server:
-        server.login(user, password)
-        server.sendmail(from_addr, to_list, msg.as_string())
-
-# ----------------- main
+    msg["From"] = s.get("from") or s["user"]
+    # hide recipients: deliver to yourself, BCC the list
+    msg["To"] = s.get("from") or s["user"]
+    msg.set_content(body)
+    # connect + send
+    with smtplib.SMTP(s.get("host","smtp.gmail.com"), s.get("port",587)) as server:
+        server.starttls()
+        server.login(s["user"], s["pass"])
+        server.send_message(msg, to_addrs=[s.get("from") or s["user"]], bcc_addrs=s["to"])
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", default="config_notify.yaml")
     ap.add_argument("--picklist", required=True)
-    ap.add_argument("--topk", type=int, default=6)
-    ap.add_argument("--week", default=os.environ.get("WEEK", ""))
+    ap.add_argument("--topk", default="6")
     args = ap.parse_args()
 
-    # SMTP settings from env (workflow) first, then config file as fallback
-    cfg = read_yaml_safe(Path(args.config))
-    smtp_user = os.environ.get("SMTP_USER") or cfg.get("smtp_user", "")
-    smtp_pass = os.environ.get("SMTP_PASS") or cfg.get("smtp_pass", "")
-    smtp_to   = os.environ.get("SMTP_TO")   or cfg.get("smtp_to", "")
-    smtp_from = os.environ.get("SMTP_FROM") or cfg.get("smtp_from", smtp_user)
-
-    if not (smtp_user and smtp_pass and smtp_to):
-        raise SystemExit("Missing SMTP settings (need SMTP_USER, SMTP_PASS, SMTP_TO).")
-
+    topk = int(args.topk)
+    cfg = load_cfg(Path(args.config))
     df = load_picklist(Path(args.picklist))
-    target = pick_target_week(df, args.week)
-    this = df[df["week_start"] == target]
 
-    if this.empty:
-        recent = sorted(set(df["week_start"].dropna().dt.strftime("%Y-%m-%d")))[-5:]
-        raise SystemExit(
-            f"No rows for week_start = {target.date()} in {args.picklist}.\n"
-            f"Recent weeks in file: {recent}"
+    if df is None:
+        raise SystemExit(1)
+
+    week = choose_target_week(df)
+    name_map = load_symbol_names()
+
+    if week is None:
+        # either empty file or no week_start <= today
+        subject = "Weekly picks — No picks this week"
+        body = (
+            "Hi,\n\n"
+            "There are no valid rows in the picklist for the current week.\n"
+            "This usually means the picklist file is empty or the week_start values are all in the future.\n\n"
+            "Cheers,\nCEO of Kanute"
         )
+        send_email(cfg, subject, body)
+        print("INFO: sent 'No picks' email.")
+        return
 
-    if "rank" in this.columns or "score" in this.columns:
-        keys = [k for k in ("rank", "score") if k in this.columns]
-        this = this.sort_values(keys)
+    # pick that week and top-K
+    dfw = df[df["week_start"] == week]
+    if "rank" in dfw.columns:
+        dfw = dfw.sort_values("rank")
+    symbols = [s for s in dfw["symbol"].astype(str).tolist()][:topk]
+
+    subject = f"Weekly picks — {week.isoformat()}"
+    if symbols:
+        lines = format_lines(symbols, name_map)
+        body = (
+            f"Hi,\n\n"
+            f"Weekly picks for week starting {week}:\n\n{lines}\n\n"
+            f"Good trading,\nCEO of Kanute"
+        )
     else:
-        if "symbol" in this.columns:
-            this = this.sort_values("symbol")
-
-    symbols = list(this["symbol"].astype(str).head(max(1, args.topk)))
-    html = build_email_html(str(target.date()), symbols)
-
-    to_list = [x.strip() for x in smtp_to.replace(";", ",").split(",") if x.strip()]
-    subject = f"Weekly Picks — {target.date()}"
-    send_email(smtp_user, smtp_pass, to_list, subject, html, smtp_from)
-    print(f"Sent weekly picks for {target.date()}: {', '.join(symbols)}")
+        body = (
+            f"Hi,\n\n"
+            f"No symbols selected for week starting {week}.\n\n"
+            f"Good trading,\nCEO of Kanute"
+        )
+    send_email(cfg, subject, body)
+    print("INFO: email sent with subject:", subject)
 
 if __name__ == "__main__":
     main()
