@@ -1,89 +1,76 @@
 #!/usr/bin/env python3
-import argparse, smtplib, ssl, sys
-from email.mime.text import MIMEText
-from email.utils import formatdate
-from pathlib import Path
-import pandas as pd
-import yaml
+import argparse, os, ssl, smtplib, sys
+from email.message import EmailMessage
+from datetime import datetime
+import pandas as pd, yaml
 
-def load_cfg(path: Path):
-    if path.exists():
-        with path.open("r", encoding="utf-8") as f:
-            return yaml.safe_load(f) or {}
-    return {}
+def load_cfg(path):
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
 
-def pick_week(df: pd.DataFrame, week_str: str | None):
-    # Expect columns: week_start, symbol and optionally rank/score
-    if "week_start" not in df.columns or "symbol" not in df.columns:
-        raise SystemExit("picklist must have columns: week_start, symbol (rank optional)")
-    df["week_start"] = pd.to_datetime(df["week_start"])
-    if week_str:
-        wk = pd.Timestamp(week_str)
-    else:
-        wk = df["week_start"].max()
-    week_df = df[df["week_start"] == wk].copy()
-    if "rank" in week_df.columns:
-        week_df = week_df.sort_values(["rank", "symbol"])
-    return wk.date(), week_df
+def get_smtp(cfg):
+    s = cfg.get("smtp", {}) or {}
+    host = s.get("host") or cfg.get("smtp_host")
+    port = s.get("port") or cfg.get("smtp_port") or 587
+    user = s.get("user") or cfg.get("smtp_user")
+    pw   = s.get("password") or cfg.get("smtp_password")
+    tls  = s.get("starttls", True) if "smtp" in cfg else cfg.get("smtp_starttls", True)
+    from_addr = s.get("from") or cfg.get("smtp_from") or user
+    # recipients: nested list or flat single
+    recips = cfg.get("recipients")
+    if not recips:
+        to = cfg.get("smtp_to")
+        recips = [to] if to else []
+    return host, int(port), user, pw, bool(tls), from_addr, list(recips)
 
-def format_body(week_date, rows, topk: int):
-    rows = rows.head(topk).reset_index(drop=True)
-    lines = [f"Weekly picks — week start {week_date}"]
-    lines.append("")
-    for i, r in rows.iterrows():
-        rank = r["rank"] if "rank" in r else (i + 1)
-        sym = r["symbol"]
-        lines.append(f"{rank:>2}. {sym}")
-    lines.append("")
-    lines.append("Good trading")
-    return "\n".join(lines)
-
-def send_mail(cfg, subject: str, body: str):
-    smtp_host = cfg.get("smtp_host", "smtp.office365.com")
-    smtp_port = int(cfg.get("smtp_port", 587))
-    user = cfg["smtp_user"]
-    pwd  = cfg["smtp_pass"]
-    to_list = [e.strip() for e in str(cfg.get("smtp_to","")).split(",") if e.strip()]
-    from_addr = cfg.get("smtp_from", user)
-
-    # Hide recipients: put them in BCC, send To: undisclosed
-    msg = MIMEText(body, _subtype="plain", _charset="utf-8")
-    msg["Subject"] = subject
-    msg["From"] = from_addr
-    msg["To"] = "Undisclosed-Recipients:;"
-    msg["Date"] = formatdate(localtime=True)
-
-    context = ssl.create_default_context()
-    with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as s:
-        s.starttls(context=context)
-        s.login(user, pwd)
-        s.sendmail(from_addr, to_list, msg.as_string())
+def build_body(picklist_path, topk):
+    df = pd.read_csv(picklist_path)
+    if "week_start" not in df or "symbol" not in df:
+        raise ValueError("picklist missing columns (week_start, symbol)")
+    wk = df["week_start"].max()
+    sub = df[df["week_start"] == wk].copy()
+    if "rank" in sub:
+        sub = sub.sort_values("rank")
+    elif "score" in sub:
+        sub = sub.sort_values("score", ascending=False)
+    syms = sub["symbol"].head(topk).tolist()
+    lines = [f"Weekly picks — week start {wk}", ""]
+    for i, s in enumerate(syms, 1):
+        lines.append(f"{i:>2}. {s}")
+    lines += ["", "good trading — very good.", "— CEO of Kanute"]
+    return wk, syms, "\n".join(lines)
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="config_notify.yaml")
-    ap.add_argument("--picklist", required=True, help="CSV with week_start,symbol,(rank)")
+    ap.add_argument("--config", required=True)
+    ap.add_argument("--picklist", required=True)
     ap.add_argument("--topk", type=int, default=6)
-    ap.add_argument("--week", default=None, help="YYYY-MM-DD (default: latest in CSV)")
     args = ap.parse_args()
 
-    cfg = load_cfg(Path(args.config))
-    if not {"smtp_user","smtp_pass","smtp_to"} <= set(cfg.keys()):
-        raise SystemExit("Missing SMTP settings in config_notify.yaml")
+    cfg = load_cfg(args.config)
+    host, port, user, pw, use_tls, from_addr, recips = get_smtp(cfg)
+    if not (host and user and pw and recips):
+        print("Missing SMTP settings in config_notify.yaml", file=sys.stderr)
+        sys.exit(1)
 
-    df = pd.read_csv(args.picklist)
-    week_date, week_df = pick_week(df, args.week)
-    if week_df.empty:
-        raise SystemExit(f"No rows for week_start {week_date} in {args.picklist}")
+    wk, syms, body = build_body(args.picklist, args.topk)
+    msg = EmailMessage()
+    msg["Subject"] = "Weekly picks"
+    msg["From"] = from_addr or user
+    msg["To"] = user  # send to yourself
+    # hide recipients as Bcc
+    for r in recips:
+        if r and r != user:
+            msg["Bcc"] = (msg.get("Bcc") + "," if msg.get("Bcc") else "") + r
+    msg.set_content(body)
 
-    subject = "Weekly picks"
-    body = format_body(week_date, week_df, args.topk)
+    with smtplib.SMTP(host, port, timeout=30) as s:
+        if use_tls:
+            s.starttls(context=ssl.create_default_context())
+        s.login(user, pw)
+        s.send_message(msg)
 
-    send_mail(cfg, subject, body)
-    print("Email sent.")
+    print("Sent weekly picks for", wk, "->", syms)
 
 if __name__ == "__main__":
-    try:
-        main()
-    except KeyboardInterrupt:
-        sys.exit(130)
+    main()
