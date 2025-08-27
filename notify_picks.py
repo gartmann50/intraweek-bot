@@ -35,7 +35,7 @@ def format_body(week_date, rows, topk: int):
         sym = r["symbol"]
         lines.append(f"{rank:>2}. {sym}")
     lines.append("")
-    lines.append("Good trading,\nVery good.\n\nCEO of Kanute")
+    lines.append("Good trading")
     return "\n".join(lines)
 
 def send_mail(cfg, subject: str, body: str):
