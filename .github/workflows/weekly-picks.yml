@@ -82,8 +82,9 @@ jobs:
         run: |
           python show_next_picks.py --picklist backtests/picklist_highrsi_trend.csv --topk 6 || true
 
-      - name: Build weekly picklist (RSI≥68, rank=rsi, max_ext20=0.15, Top-40/wk)
-  run: |
+     - name: Build weekly picklist (RSI≥68, max_ext20=0.15, Top-40/wk)
+    shell: bash
+    run: |
     python build_picklist_parametric.py \
       --data-dir stock_data_400 \
       --out backtests/picklist_highrsi_trend.csv \
