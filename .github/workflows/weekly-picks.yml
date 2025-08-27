@@ -55,7 +55,7 @@ jobs:
         run: |
           mkdir -p backtests stock_data_400 notifications
 
-      # Creates config_notify.yaml from repo secrets (Gmail)
+      # ----- EMAIL CONFIG FROM SECRETS (Gmail) -----
       - name: Write config_notify.yaml (Gmail, from secrets)
         env:
           SMTP_USER: ${{ secrets.SMTP_USER }}
@@ -92,10 +92,9 @@ jobs:
       - name: STATUS — show inputs and time
         if: ${{ github.event.inputs.mode == 'status' }}
         run: |
-          echo "UNTIL=${UNTIL}"
-          echo "TOPK=${TOPK}"
-          date
+          echo "UNTIL=${UNTIL}"; echo "TOPK=${TOPK}"; date
 
+      # ----- BUILD PICKLIST -----
       - name: Build weekly picklist (RSI>=68, rank=rsi, max_ext20=0.15, Top-40/wk)
         if: ${{ github.event.inputs.mode == 'build' }}
         shell: bash
@@ -108,11 +107,43 @@ jobs:
             --top-per-week 40 \
             --until "${UNTIL}"
 
+      # ----- INLINE PREVIEW (no external script needed) -----
       - name: Preview Top-6 (inline)
         if: ${{ github.event.inputs.mode == 'build' }}
         shell: bash
         run: |
-          python show_next_picks.py --picklist backtests/picklist_highrsi_trend.csv --topk "${TOPK}"
+          python - <<'PY'
+          import os, pandas as pd, numpy as np
+          path = 'backtests/picklist_highrsi_trend.csv'
+          topk = int(os.environ.get('TOPK','6'))
+          until = os.environ['UNTIL']
+          if not os.path.exists(path):
+              raise SystemExit(f"Picklist not found: {path}")
+          df = pd.read_csv(path)
+          # normalize column names
+          df.columns = [c.strip().lower() for c in df.columns]
+          if 'week_start' not in df.columns:
+              if 'week_start_date' in df.columns:
+                  df.rename(columns={'week_start_date':'week_start'}, inplace=True)
+              else:
+                  raise SystemExit("CSV missing 'week_start' column.")
+          if 'symbol' not in df.columns:
+              raise SystemExit("CSV missing 'symbol' column.")
+          df['week_start'] = pd.to_datetime(df['week_start'], errors='coerce', utc=False)
+          df = df.dropna(subset=['week_start'])
+          until_dt = pd.to_datetime(until)
+          latest = df.loc[df['week_start']<=until_dt, 'week_start'].max()
+          if pd.isna(latest):
+              raise SystemExit(f"No rows for week_start <= {until} in {path}")
+          sub = df[df['week_start']==latest].copy()
+          if 'rank' in sub.columns:
+              sub = sub.sort_values('rank', ascending=True)
+          elif 'score' in sub.columns:
+              sub = sub.sort_values('score', ascending=False)
+          out = sub.head(topk)[['symbol'] + [c for c in ('rank','score') if c in sub.columns]]
+          print(f"Week start: {latest.date()} | Top-{topk}")
+          print(out.to_string(index=False))
+          PY
 
       - name: EMAIL_SMOKE — send test email (Bcc to SMTP_TO)
         if: ${{ github.event.inputs.mode == 'email_smoke' }}
