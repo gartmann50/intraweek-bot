@@ -126,15 +126,25 @@ def main():
     args = ap.parse_args()
 
     # 1) SMTP config
-    cfg = load_yaml(args.config)
-    user = cfg.get("smtp_user", "")
-    pwd  = cfg.get("smtp_pass", "")
-    tos  = cfg.get("smtp_to", "")
-    sender = cfg.get("smtp_from", user or "noreply@localhost")
-    if not (user and pwd and tos):
-        print("Missing SMTP settings in config_notify.yaml")
-        sys.exit(1)
-    recipients = [t.strip() for t in str(tos).split(",") if t.strip()]
+    # 1) SMTP config
+cfg = {}
+try:
+    cfg = load_yaml(args.config) if os.path.exists(args.config) else {}
+except Exception:
+    cfg = {}
+
+# fallbacks from environment so Actions can still work even if the file is empty
+user = (cfg.get("smtp_user") or os.getenv("SMTP_USER", "")).strip()
+pwd  = (cfg.get("smtp_pass") or os.getenv("SMTP_PASS", "")).strip()
+tos  = (cfg.get("smtp_to")   or os.getenv("SMTP_TO",   "")).strip()
+sender = (cfg.get("smtp_from") or os.getenv("SMTP_FROM", "") or user).strip()
+
+if not (user and pwd and tos):
+    print("Missing SMTP settings in config_notify.yaml (and env fallbacks).")
+    sys.exit(1)
+
+recipients = [t.strip() for t in tos.split(",") if t.strip()]
+
 
     # 2) Picklist load + choose week
     df = read_picklist(args.picklist)
