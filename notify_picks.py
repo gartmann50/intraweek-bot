@@ -70,10 +70,11 @@ def choose_target_week(df: pd.DataFrame) -> Optional[date]:
     if df is None or df.empty:
         return None
     today = datetime.now(timezone.utc).astimezone().date()
-    candidates = df.loc[df["week_start"] <= today, "week_start"]
-    if candidates.empty:
-        return None
-    return candidates.max()
+    candidates = ws[ws >= today]
+    if not candidates.empty:
+        return candidates.min()
+    candidates = ws[ws <= today]
+    return candidates.max() if not candidates.empty else None
 
 
 def load_symbol_names() -> dict[str, str]:
