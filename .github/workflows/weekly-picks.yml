@@ -6,42 +6,23 @@ on:
       mode:
         description: What to run
         type: choice
+        options: [status, build, email_smoke, open, close]
         required: true
-        options: [status, build, open, close, email_smoke]
-        default: status
+        default: build
       until:
-        description: Override "until" date (YYYY-MM-DD). Blank = today (Oslo)
+        description: Override “until” date (YYYY-MM-DD). Blank = today (Oslo)
         required: false
         default: ""
       topk:
         description: How many symbols to show/send
         required: false
         default: "6"
-      dry:
-        description: Use --dry-run for open/close
-        type: boolean
-        required: false
-        default: true
 
 jobs:
   run:
     runs-on: ubuntu-latest
     env:
       TZ: Europe/Oslo
-
-      # Email (only needed for build/email_smoke)
-      SMTP_USER: ${{ secrets.SMTP_USER }}
-      SMTP_PASS: ${{ secrets.SMTP_PASS }}
-      SMTP_TO:   ${{ secrets.SMTP_TO }}
-      SMTP_FROM: ${{ secrets.SMTP_FROM }}
-      SMTP_HOST: ${{ secrets.SMTP_HOST || 'smtp.gmail.com' }}
-      SMTP_PORT: ${{ secrets.SMTP_PORT || '587' }}
-
-      # Alpaca (only needed for open/close)
-      ALPACA_API_KEY_ID:     ${{ secrets.ALPACA_API_KEY_ID }}
-      ALPACA_API_SECRET_KEY: ${{ secrets.ALPACA_API_SECRET_KEY }}
-      ALPACA_BASE_URL:       ${{ secrets.ALPACA_BASE_URL }}
-
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -54,75 +35,59 @@ jobs:
       - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy PyYAML requests pytz
-
-      - name: STATUS — show inputs and time
-        run: |
-          echo "mode   = ${{ github.event.inputs.mode }}"
-          echo "until  = '${{ github.event.inputs.until }}'"
-          echo "topk   = ${{ github.event.inputs.topk }}"
-          echo "dry    = ${{ github.event.inputs.dry }}"
-          date +"Runner time: %Y-%m-%d %H:%M:%S %Z"
-          echo "CSV count in stock_data_400:"
-          ls -1 stock_data_400/*.csv 2>/dev/null | wc -l
+          pip install pandas numpy pyyaml requests python-dateutil pytz tabulate
+          pip install alpaca-trade-api
 
       - name: Compute UNTIL date and shell flags
-        id: flags
+        id: dates
         shell: bash
         run: |
           if [[ -n "${{ github.event.inputs.until }}" ]]; then
             UNTIL="${{ github.event.inputs.until }}"
           else
-            UNTIL="$(TZ="Europe/Oslo" date +%F)"
+            UNTIL="$(date +%F)"
           fi
-          echo "UNTIL=$UNTIL" | tee -a $GITHUB_ENV
-          echo "TOPK=${{ github.event.inputs.topk }}" >> $GITHUB_ENV
-          if [[ "${{ github.event.inputs.dry }}" == "true" ]]; then
-            echo "DRY=--dry-run" >> $GITHUB_ENV
-          else
-            echo "DRY=" >> $GITHUB_ENV
-          fi
+          echo "UNTIL=$UNTIL" >> $GITHUB_OUTPUT
 
       - name: Ensure folders
         run: |
-          mkdir -p backtests notifications out
+          mkdir -p backtests notifications artifacts stock_data_400
 
-      - name: Write config_notify.yaml (from secrets)
+      - name: Write config_highrsi.yaml
         run: |
-          cat > config_notify.yaml <<EOF
+          cat > config_highrsi.yaml <<'YAML'
+          data_dir: stock_data_400
+          preset: classic
+          rsi_min: 68
+          rank: rsi
+          max_ext20: 0.15
+          top_per_week: 40
+          YAML
+
+      - name: Write config_notify.yaml (Gmail, from secrets)
+        run: |
+          cat > config_notify.yaml <<'YAML'
           smtp:
-            user: "${SMTP_USER}"
-            password: "${SMTP_PASS}"
-            host: "${SMTP_HOST}"
-            port: ${SMTP_PORT}
-            to: "${SMTP_TO}"
-            from: "${SMTP_FROM:-$SMTP_USER}"
-          email:
-            subject_prefix: "Weekly picks"
-            signoff: |
-              Good trading — very good.
-              CEO of Kanute
-          EOF
+            host: smtp.gmail.com
+            port: 587
+            user: "${{ secrets.SMTP_USER }}"
+            password: "${{ secrets.SMTP_PASS }}"
+            starttls: true
+            from: "CEO of Kanute <${{ secrets.SMTP_USER }}>"
+          recipients:
+            - "${{ secrets.SMTP_TO }}"
+          YAML
 
-      - name: EMAIL_SMOKE — send test email (Bcc to SMTP_TO)
-        if: ${{ github.event.inputs.mode == 'email_smoke' }}
+      - name: STATUS — show inputs and time
         run: |
-          python - << 'PY'
-          import os, smtplib
-          host = os.environ['SMTP_HOST']; port = int(os.environ['SMTP_PORT'])
-          user = os.environ['SMTP_USER']; pw = os.environ['SMTP_PASS']
-          to   = [a.strip() for a in os.environ['SMTP_TO'].split(',') if a.strip()]
-          from_addr = os.environ.get('SMTP_FROM') or user
-          msg = f"Subject: Smoke OK - Weekly Picks CI\n\nRun {os.environ.get('GITHUB_RUN_ID')}"
-          with smtplib.SMTP(host, port, timeout=30) as s:
-              s.starttls(); s.login(user, pw); s.sendmail(from_addr, to, msg)
-          print("Smoke test email sent to:", ", ".join(to))
-          PY
+          echo "Mode : ${{ github.event.inputs.mode }}"
+          echo "Until: ${{ steps.dates.outputs.UNTIL }}"
+          echo "TopK : ${{ github.event.inputs.topk || '6' }}"
+          date
 
-      # --------- BUILD picklist from local CSV universe ----------
+      # ---------- BUILD PICKLIST ----------
       - name: Build weekly picklist (RSI≥68, rank=rsi, max_ext20=0.15, Top-40/wk)
-        if: ${{ github.event.inputs.mode == 'build' || github.event.inputs.mode == 'open' || github.event.inputs.mode == 'close' }}
-        shell: bash
+        if: startsWith(github.event.inputs.mode, 'build') || startsWith(github.event.inputs.mode, 'open') || startsWith(github.event.inputs.mode, 'close')
         run: |
           python build_picklist_parametric.py \
             --data-dir stock_data_400 \
@@ -130,70 +95,71 @@ jobs:
             --rsi-min 68 \
             --max-ext20 0.15 \
             --top-per-week 40 \
-            --until "${{ env.UNTIL }}"
+            --until "${{ steps.dates.outputs.UNTIL }}"
 
-      - name: Preview Top-${{ env.TOPK }} (inline)
-        if: ${{ github.event.inputs.mode == 'build' || github.event.inputs.mode == 'open' || github.event.inputs.mode == 'close' }}
+      - name: Preview Top-6 (inline)
+        if: startsWith(github.event.inputs.mode, 'build')
         run: |
-          python - << 'PY'
-          import os, sys, pandas as pd, pathlib as p
-          path = p.Path("backtests/picklist_highrsi_trend.csv")
-          if not path.exists():
-              print("Picklist not found:", path)
-              sys.exit(1)
-          df = pd.read_csv(path)
-          topk = int(os.environ.get("TOPK", "6"))
-          if "week_start" in df.columns:
-              df["week_start"] = pd.to_datetime(df["week_start"])
-              df = df[df["week_start"] == df["week_start"].max()].copy()
-          if "rank" in df.columns:
-              df = df.sort_values(["week_start","rank"])
-          syms = list(df["symbol"].head(topk))
-          lines = [f"{i+1:2d}. {s}" for i,s in enumerate(syms)]
-          print("\n".join(lines))
-          print("\nCSV:", ",".join(syms))
-          # nice summary pane
-          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
-              f.write("### Top picks\n\n")
-              f.write("\n".join(lines))
-              f.write("\n\nCSV: " + ",".join(syms) + "\n")
+          python show_next_picks.py \
+            --picklist backtests/picklist_highrsi_trend.csv \
+            --topk ${{ github.event.inputs.topk || '6' }}
+
+      # ---------- EMAIL ----------
+      - name: EMAIL_SMOKE — send test email (Bcc to SMTP_TO)
+        if: github.event.inputs.mode == 'email_smoke'
+        run: |
+          python - <<'PY'
+          import os, ssl, smtplib
+          from email.message import EmailMessage
+          msg = EmailMessage()
+          msg['Subject'] = "Smoke test from GitHub Actions"
+          msg['From'] = f"CEO of Kanute <{os.environ['SMTP_USER']}>"
+          msg['To'] = os.environ['SMTP_USER']
+          if os.environ.get('SMTP_TO'):
+              msg['Bcc'] = os.environ['SMTP_TO']
+          msg.set_content("If you see this, SMTP works.")
+          with smtplib.SMTP('smtp.gmail.com', 587, timeout=30) as s:
+              s.starttls(context=ssl.create_default_context())
+              s.login(os.environ['SMTP_USER'], os.environ['SMTP_PASS'])
+              s.send_message(msg)
           PY
+        env:
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_TO:   ${{ secrets.SMTP_TO }}
 
       - name: Email weekly picks
-        if: ${{ github.event.inputs.mode == 'build' }}
-        shell: bash
+        if: startsWith(github.event.inputs.mode, 'build')
         run: |
           python notify_picks.py \
             --config config_notify.yaml \
             --picklist backtests/picklist_highrsi_trend.csv \
-            --topk "${{ env.TOPK }}"
+            --topk ${{ github.event.inputs.topk || '6' }}
 
-      - name: Upload build artifacts
-        if: ${{ github.event.inputs.mode == 'build' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: weekly-picklist
-          path: backtests/picklist_highrsi_trend.csv
-          if-no-files-found: warn
-
-      # --------- OPTIONAL Alpaca ops ----------
-      - name: Open positions (Top-K)  — ${{ env.DRY }}
-        if: ${{ github.event.inputs.mode == 'open' }}
-        shell: bash
+      # ---------- DRY OPS ----------
+      - name: Open positions (Top-K) — DRY
+        if: startsWith(github.event.inputs.mode, 'open')
         run: |
           python weekly_ops_highrsi.py \
             --action open \
             --config config_highrsi.yaml \
-            ${{ env.DRY }} \
-            --timings
+            --dry-run
 
-      - name: Close positions (CLS; fallback market) — ${{ env.DRY }}
-        if: ${{ github.event.inputs.mode == 'close' }}
-        shell: bash
+      - name: Close positions (CLS; fallback market) — DRY
+        if: startsWith(github.event.inputs.mode, 'close')
         run: |
           python weekly_ops_highrsi.py \
             --action close \
             --config config_highrsi.yaml \
             --close-method cls \
-            ${{ env.DRY }} \
-            --timings
+            --dry-run
+
+      - name: Upload build artifacts
+        if: startsWith(github.event.inputs.mode, 'build')
+        uses: actions/upload-artifact@v4
+        with:
+          name: weekly-build
+          path: |
+            backtests/picklist_highrsi_trend.csv
+            config_highrsi.yaml
+            config_notify.yaml
