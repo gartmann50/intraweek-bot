@@ -1,192 +1,152 @@
-name: Weekly Picks (manual)
+name: Weekly Picks
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        description: What to run
+        description: "Choose action: status, build, open_dry, open_live, close_dry, close_live, email_smoke"
         required: true
+        default: "status"
         type: choice
-        default: status
-        options: [status, build, open, close, email_smoke]
+        options:
+          - status
+          - build
+          - open_dry
+          - open_live
+          - close_dry
+          - close_live
+          - email_smoke
       until:
-        description: Override "until" date (YYYY-MM-DD). Blank = today (Oslo)
+        description: "YYYY-MM-DD to build up to (Oslo date). Leave blank to auto use last Friday."
         required: false
         default: ""
-      topk:
-        description: How many symbols to show/send
-        required: false
-        default: "6"
 
 jobs:
-  run:
+  weekly:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     env:
-      TZ: Europe/Oslo
-      # Secrets (set these in Settings → Secrets and variables → Actions)
+      # Secrets for mail & Alpaca
+      GMAIL_USER: ${{ secrets.GMAIL_USER }}
+      GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+      RECIPIENTS: ${{ secrets.RECIPIENTS }}
       ALPACA_API_KEY_ID: ${{ secrets.ALPACA_API_KEY_ID }}
       ALPACA_API_SECRET_KEY: ${{ secrets.ALPACA_API_SECRET_KEY }}
-      ALPACA_BASE_URL: ${{ secrets.ALPACA_BASE_URL || 'https://paper-api.alpaca.markets' }}
-      POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
-      SMTP_USER: ${{ secrets.SMTP_USER }}
-      SMTP_PASS: ${{ secrets.SMTP_PASS }}
-      SMTP_TO:   ${{ secrets.SMTP_TO }}
-      SMTP_FROM: ${{ secrets.SMTP_FROM }}
+      ALPACA_BASE_URL: ${{ secrets.ALPACA_BASE_URL }}
 
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      - name: Install Python deps
+      - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install pandas numpy pyyaml requests python-dateutil
+          python -m pip install -U pip
+          pip install pandas numpy pyyaml alpaca-trade-api pytz
 
-      - name: STATUS — show inputs and time
+      - name: Compute UNTIL date (most recent Friday in Oslo if empty)
+        id: dates
+        shell: python
         run: |
-          echo "mode:  ${{ inputs.mode }}"
-          echo "until: ${{ inputs.until }}"
-          echo "topk:  ${{ inputs.topk }}"
-          date
+          import os, json
+          from datetime import datetime, timedelta
+          from zoneinfo import ZoneInfo
+          until = "${{ github.event.inputs.until }}".strip()
+          if not until:
+            now_oslo = datetime.now(ZoneInfo("Europe/Oslo")).date()
+            d = now_oslo
+            while d.weekday() != 4:  # Friday
+              d -= timedelta(days=1)
+            until = d.isoformat()
+          print("UNTIL=", until)
+          with open(os.environ['GITHUB_OUTPUT'], "a") as fh:
+            fh.write(f"until={until}\n")
 
-      - name: Compute UNTIL date and DRY flag
-        id: when
-        shell: bash
-        run: |
-          if [[ -n "${{ inputs.until }}" ]]; then
-            UNTIL="${{ inputs.until }}"
-          else
-            UNTIL="$(TZ=Europe/Oslo date +%F)"
-          fi
-          echo "until=$UNTIL" >> "$GITHUB_OUTPUT"
-          if [[ "${{ inputs.mode }}" == "open" || "${{ inputs.mode }}" == "close" ]]; then
-            echo "dry=no" >> "$GITHUB_OUTPUT"
-          else
-            echo "dry=yes" >> "$GITHUB_OUTPUT"
-          fi
-          echo "UNTIL: $UNTIL  DRY: $(cat $GITHUB_OUTPUT | sed -n 's/^dry=//p')"
-
-      - name: Ensure folders
-        run: |
-          mkdir -p universe backtests stock_data_400 notifications
-
-      # Optional: pull a fresh symbol universe from Polygon (names only).
-      # This does NOT download price history; it just writes universe/polygon_universe.csv
-      - name: Refresh weekly universe (Polygon)
-        if: ${{ inputs.mode != 'status' && env.POLYGON_API_KEY != '' }}
-        env:
-          POLYGON_API_KEY: ${{ env.POLYGON_API_KEY }}
-        run: |
-          python - <<'PY'
-          import os, requests, pandas as pd
-          key = os.environ.get("POLYGON_API_KEY","")
-          if not key:
-              print("No POLYGON_API_KEY; skipping.")
-              raise SystemExit(0)
-          url = f"https://api.polygon.io/v3/reference/tickers?market=stocks&active=true&limit=1000&apiKey={key}"
-          syms=[]
-          while url:
-              r = requests.get(url, timeout=30)
-              r.raise_for_status()
-              data = r.json()
-              for t in data.get("results", []):
-                  ex = (t.get("primary_exchange") or "").upper()
-                  if ex in ("NYSE","NASDAQ","AMEX"):
-                      s = t.get("ticker","")
-                      if s.isupper() and s.isalpha() and 1 <= len(s) <= 5:
-                          syms.append(s)
-              url = data.get("next_url")
-              if url and "apiKey=" not in url:
-                  url += f"&apiKey={key}"
-          syms = sorted(set(syms))
-          pd.DataFrame({"symbol": syms}).to_csv("universe/polygon_universe.csv", index=False)
-          print("Universe size:", len(syms))
-          PY
-
-      - name: Write config_highrsi.yaml
-        run: |
-          cat > config_highrsi.yaml <<'YAML'
-          data_dir: stock_data_400
-          until: "${{ steps.when.outputs.until }}"
-          rsi_min: 68
-          rank: rsi
-          max_ext20: 0.15
-          top_per_week: 40
-          topk: ${{ inputs.topk }}
-          YAML
-
-      - name: Write config_notify.yaml
+      - name: Write config_notify.yaml from secrets (runner only)
         run: |
           cat > config_notify.yaml <<'YAML'
-          smtp:
-            user: "${{ env.SMTP_USER }}"
-            password: "${{ env.SMTP_PASS }}"
-            to: "${{ env.SMTP_TO }}"
-            from: "${{ env.SMTP_FROM }}"
-          footer: |
-            Good trading — very good.
-            CEO of Kanute
-          subject_prefix: "Weekly picks"
+          email:
+            user: "${GMAIL_USER}"
+            app_password: "${GMAIL_APP_PASSWORD}"
+            recipients_bcc: "${RECIPIENTS}"
+            subject_prefix: "Weekly picks"
           YAML
+          echo "Wrote config_notify.yaml"
 
-      - name: EMAIL_SMOKE — send test email (Bcc to SMTP_TO)
-        if: ${{ inputs.mode == 'email_smoke' }}
-        env:
-          SMTP_USER: ${{ env.SMTP_USER }}
-          SMTP_PASS: ${{ env.SMTP_PASS }}
-          SMTP_TO:   ${{ env.SMTP_TO }}
-          SMTP_FROM: ${{ env.SMTP_FROM }}
+      - name: Status (list top 6 for latest week)  # safe, no trading
+        if: ${{ github.event.inputs.mode == 'status' }}
         run: |
-          python - <<'PY'
-          import os, smtplib
-          u=os.environ["SMTP_USER"]; p=os.environ["SMTP_PASS"]
-          to=os.environ["SMTP_TO"]; sender=os.environ.get("SMTP_FROM",u)
-          msg=("From: %s\r\nTo: %s\r\nBcc: %s\r\nSubject: Smoke test\r\n\r\n"
-               "This is a smoke test from GitHub Actions.\r\n") % (sender, sender, to)
-          with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as s:
-              s.starttls(); s.login(u, p); s.sendmail(sender, [sender]+to.split(","), msg)
-          print("Smoke email sent.")
-          PY
+          python show_next_picks.py --picklist backtests/picklist_highrsi_trend.csv --topk 6 || true
 
-      - name: Build picklist (RSI≥68, rank=rsi)
-        if: ${{ inputs.mode == 'build' }}
-        # NOTE: this expects your repo to already contain CSVs in stock_data_400/.
-        # If you want the runner to download history from Polygon too, tell me and
-        # I’ll add a (heavier) sync step.
+      - name: Build weekly picklist (RSI≥68, rank=rsi, max_ext20=0.15, Top-40/wk)
+        if: ${{ github.event.inputs.mode == 'build' || startsWith(github.event.inputs.mode, 'open_') || github.event.inputs.mode == 'email_smoke' }}
         run: |
-          if [[ "${{ steps.when.outputs.until }}" == "" ]]; then echo "No UNTIL"; exit 1; fi
           python build_picklist_parametric.py \
-            --data-dir stock_data_400 \
-            --out backtests/picklist_highrsi_trend.csv \
+            --config config_highrsi.yaml \
             --since 2020-01-01 \
-            --preset classic \
-            --rsi-min 68 \
-            --rank rsi \
-            --max-ext20 0.15 \
-            --top-per-week 40 \
-            --until "${{ steps.when.outputs.until }}"
+            --until "${{ steps.dates.outputs.until }}" \
+            --preset classic --rsi-min 68 --rank rsi --max-ext20 0.15 --top-per-week 40 \
+            --out backtests/picklist_highrsi_trend.csv
 
-      - name: Preview Top-${{ inputs.topk }}
-        if: ${{ inputs.mode == 'build' }}
+      - name: Refresh company names (for nicer emails)
+        if: ${{ github.event.inputs.mode == 'build' || startsWith(github.event.inputs.mode, 'open_') || github.event.inputs.mode == 'email_smoke' }}
         run: |
-          python show_next_picks.py --picklist backtests/picklist_highrsi_trend.csv --topk ${{ inputs.topk }}
+          python refresh_symbol_names.py || true
 
-      - name: Email weekly picks
-        if: ${{ inputs.mode == 'build' }}
+      - name: Email picks (smoke -> no poem; build -> full poem & names)
+        if: ${{ github.event.inputs.mode == 'email_smoke' || github.event.inputs.mode == 'build' }}
         run: |
-          python notify_picks.py --config config_notify.yaml --picklist backtests/picklist_highrsi_trend.csv --topk ${{ inputs.topk }}
+          if [ "${{ github.event.inputs.mode }}" = "email_smoke" ]; then
+            python notify_picks.py --config config_notify.yaml --picklist backtests/picklist_highrsi_trend.csv --topk 6 --no-poem
+          else
+            python notify_picks.py --config config_notify.yaml --picklist backtests/picklist_highrsi_trend.csv --topk 6
+          fi
 
-      - name: Open positions (Top-K) LIVE
-        if: ${{ inputs.mode == 'open' }}
+      - name: Write live config for Alpaca (runner only)
+        if: ${{ startsWith(github.event.inputs.mode, 'open_') || startsWith(github.event.inputs.mode, 'close_') }}
         run: |
-          python weekly_ops_highrsi.py --action open --config config_highrsi.yaml
+          cat > config_live.yaml <<'YAML'
+          alpaca:
+            api_key_id: "${ALPACA_API_KEY_ID}"
+            secret_key: "${ALPACA_API_SECRET_KEY}"
+            base_url: "${ALPACA_BASE_URL}"
+          data_dir: stock_data_400
+          topk: 6
+          sizing: fixed_fraction_equal_weight
+          stop_mult: 1.75
+          target_mult: 4.0
+          tp_mode: fixed
+          use_prevclose: true
+          anchor_levels: entry
+          min_notional: 0
+          picklist_path: backtests/picklist_highrsi_trend.csv
+          close:
+            method: cls
+            cutoff_et: "15:50"
+            fallback: market
+          YAML
+          echo "Wrote config_live.yaml"
 
-      - name: Close positions (CLS; fallback market) LIVE
-        if: ${{ inputs.mode == 'close' }}
+      - name: Open (DRY)
+        if: ${{ github.event.inputs.mode == 'open_dry' }}
         run: |
-          python weekly_ops_highrsi.py --action close --config config_highrsi.yaml
+          python weekly_ops_highrsi.py --action open --config config_live.yaml --dry-run
+
+      - name: Open (LIVE)
+        if: ${{ github.event.inputs.mode == 'open_live' }}
+        run: |
+          python weekly_ops_highrsi.py --action open --config config_live.yaml
+
+      - name: Close (DRY)
+        if: ${{ github.event.inputs.mode == 'close_dry' }}
+        run: |
+          python weekly_ops_highrsi.py --action close --config config_live.yaml --close-method cls --dry-run
+
+      - name: Close (LIVE)
+        if: ${{ github.event.inputs.mode == 'close_live' }}
+        run: |
+          python weekly_ops_highrsi.py --action close --config config_live.yaml --close-method cls
