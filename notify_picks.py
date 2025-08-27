@@ -8,27 +8,32 @@ def load_picklist(path: str) -> pd.DataFrame:
     p = Path(path)
     if not p.exists():
         raise SystemExit(f"Picklist not found: {path}")
-    try:
-        df = pd.read_csv(path, parse_dates=["week_start"])
-    except Exception:
-        # if parse_dates fails due to header quirks, read then parse
-        df = pd.read_csv(path)
-        if "week_start" in df.columns:
-            df["week_start"] = pd.to_datetime(df["week_start"], errors="coerce")
+
+    # Read as-is, then normalize headers
+    df = pd.read_csv(p)
+    # strip whitespace and lower-case all column names
+    df.rename(columns=lambda c: c.strip(), inplace=True)
+    df.rename(columns=lambda c: c.lower(), inplace=True)
+
     if "week_start" not in df.columns or "symbol" not in df.columns:
         raise SystemExit(f"Picklist must have columns: week_start,symbol. Got: {list(df.columns)}")
-    df["week_start"] = df["week_start"].dt.date
+
+    # Force-parse week_start regardless of dtype, then convert to date
+    dt = pd.to_datetime(df["week_start"], errors="coerce", utc=False)
+    if dt.isna().all():
+        raise SystemExit("Could not parse any valid dates from week_start in picklist.")
+    df["week_start"] = dt.dt.date
     return df
 
 def load_names() -> dict:
-    """Load symbol->company name map if available."""
     for p in (Path("universe/symbol_names.csv"), Path("symbol_names.csv")):
         if p.exists():
             out = {}
             with p.open(newline="", encoding="utf-8") as f:
                 r = csv.DictReader(f)
+                # try common headers, fall back to first two columns
                 sym_col = "symbol" if "symbol" in r.fieldnames else r.fieldnames[0]
-                name_col = "name" if "name" in r.fieldnames else r.fieldnames[1]
+                name_col = "name"   if "name"   in r.fieldnames else r.fieldnames[1]
                 for row in r:
                     s = (row.get(sym_col, "") or "").strip().upper()
                     n = (row.get(name_col, "") or "").strip()
@@ -38,26 +43,15 @@ def load_names() -> dict:
     return {}
 
 def pick_week(df: pd.DataFrame, requested: str | None):
-    """Return a date (YYYY-MM-DD as date) to use. Always falls back to latest."""
     if requested and requested.lower() != "latest":
-        try:
-            wd = pd.to_datetime(requested, errors="coerce")
-            if pd.notna(wd):
-                wd = wd.date()
-            else:
-                wd = None
-        except Exception:
-            wd = None
+        wd = pd.to_datetime(requested, errors="coerce")
+        wd = wd.date() if pd.notna(wd) else None
     else:
         wd = None
 
-    # If requested invalid or not provided, take latest non-null
     if wd is None:
-        if df["week_start"].notna().any():
-            return df["week_start"].max()
-        raise SystemExit("Picklist has no valid week_start values.")
+        return df["week_start"].max()
 
-    # If requested exists, use it; otherwise fall back to latest with a notice
     if (df["week_start"] == wd).any():
         return wd
     latest = df["week_start"].max()
@@ -100,15 +94,12 @@ def send_email(cfg: dict, subject: str, body: str):
     to   = smtp["to"]
     from_addr = smtp.get("from", user)
 
-    if isinstance(to, str):
-        to_list = [t.strip() for t in to.split(",") if t.strip()]
-    else:
-        to_list = list(to)
+    to_list = [t.strip() for t in (to if isinstance(to, list) else to.split(",")) if t.strip()]
 
     msg = EmailMessage()
     msg["From"] = from_addr
-    msg["To"] = user          # visible "To" (your own address)
-    msg["Bcc"] = ", ".join(to_list)  # recipients hidden
+    msg["To"] = user
+    msg["Bcc"] = ", ".join(to_list)
     msg["Subject"] = subject
     msg.set_content(body)
 
@@ -133,7 +124,6 @@ def main():
     symbols   = sorted_symbols_for_week(df, week_date, args.topk)
 
     if not symbols:
-        # Give a helpful diagnostic and exit non-zero
         avail = sorted({d.isoformat() for d in df["week_start"].dropna().unique()})
         raise SystemExit(
             f"No rows for week_start={week_date} in {args.picklist}\n"
