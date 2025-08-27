@@ -29,7 +29,7 @@ jobs:
     env:
       TZ: Europe/Oslo
 
-      # Email secrets (optional unless you use build/email_smoke)
+      # Email (only needed for build/email_smoke)
       SMTP_USER: ${{ secrets.SMTP_USER }}
       SMTP_PASS: ${{ secrets.SMTP_PASS }}
       SMTP_TO:   ${{ secrets.SMTP_TO }}
@@ -37,7 +37,7 @@ jobs:
       SMTP_HOST: ${{ secrets.SMTP_HOST || 'smtp.gmail.com' }}
       SMTP_PORT: ${{ secrets.SMTP_PORT || '587' }}
 
-      # Alpaca (optional unless you use open/close)
+      # Alpaca (only needed for open/close)
       ALPACA_API_KEY_ID:     ${{ secrets.ALPACA_API_KEY_ID }}
       ALPACA_API_SECRET_KEY: ${{ secrets.ALPACA_API_SECRET_KEY }}
       ALPACA_BASE_URL:       ${{ secrets.ALPACA_BASE_URL }}
@@ -49,7 +49,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-            python-version: '3.11'
+          python-version: '3.11'
 
       - name: Install Python deps
         run: |
@@ -66,22 +66,17 @@ jobs:
           echo "CSV count in stock_data_400:"
           ls -1 stock_data_400/*.csv 2>/dev/null | wc -l
 
-      - name: Compute UNTIL date and flags
+      - name: Compute UNTIL date and shell flags
         id: flags
         shell: bash
         run: |
-          # UNTIL date
           if [[ -n "${{ github.event.inputs.until }}" ]]; then
             UNTIL="${{ github.event.inputs.until }}"
           else
             UNTIL="$(TZ="Europe/Oslo" date +%F)"
           fi
           echo "UNTIL=$UNTIL" | tee -a $GITHUB_ENV
-
-          # TOPK for later steps
           echo "TOPK=${{ github.event.inputs.topk }}" >> $GITHUB_ENV
-
-          # DRY flag for open/close
           if [[ "${{ github.event.inputs.dry }}" == "true" ]]; then
             echo "DRY=--dry-run" >> $GITHUB_ENV
           else
@@ -93,7 +88,6 @@ jobs:
           mkdir -p backtests notifications out
 
       - name: Write config_notify.yaml (from secrets)
-        # Needed for build/email steps
         run: |
           cat > config_notify.yaml <<EOF
           smtp:
@@ -109,9 +103,7 @@ jobs:
               Good trading — very good.
               CEO of Kanute
           EOF
-          echo "Wrote config_notify.yaml"
 
-      # ---------- Email smoke (optional) ----------
       - name: EMAIL_SMOKE — send test email (Bcc to SMTP_TO)
         if: ${{ github.event.inputs.mode == 'email_smoke' }}
         run: |
@@ -127,7 +119,7 @@ jobs:
           print("Smoke test email sent to:", ", ".join(to))
           PY
 
-      # ---------- BUILD picklist ----------
+      # --------- BUILD picklist from local CSV universe ----------
       - name: Build weekly picklist (RSI≥68, rank=rsi, max_ext20=0.15, Top-40/wk)
         if: ${{ github.event.inputs.mode == 'build' || github.event.inputs.mode == 'open' || github.event.inputs.mode == 'close' }}
         shell: bash
@@ -140,13 +132,32 @@ jobs:
             --top-per-week 40 \
             --until "${{ env.UNTIL }}"
 
-      - name: Preview Top-${{ env.TOPK }}
+      - name: Preview Top-${{ env.TOPK }} (inline)
         if: ${{ github.event.inputs.mode == 'build' || github.event.inputs.mode == 'open' || github.event.inputs.mode == 'close' }}
-        shell: bash
         run: |
-          python show_next_picks.py \
-            --picklist backtests/picklist_highrsi_trend.csv \
-            --topk "${{ env.TOPK }}"
+          python - << 'PY'
+          import os, sys, pandas as pd, pathlib as p
+          path = p.Path("backtests/picklist_highrsi_trend.csv")
+          if not path.exists():
+              print("Picklist not found:", path)
+              sys.exit(1)
+          df = pd.read_csv(path)
+          topk = int(os.environ.get("TOPK", "6"))
+          if "week_start" in df.columns:
+              df["week_start"] = pd.to_datetime(df["week_start"])
+              df = df[df["week_start"] == df["week_start"].max()].copy()
+          if "rank" in df.columns:
+              df = df.sort_values(["week_start","rank"])
+          syms = list(df["symbol"].head(topk))
+          lines = [f"{i+1:2d}. {s}" for i,s in enumerate(syms)]
+          print("\n".join(lines))
+          print("\nCSV:", ",".join(syms))
+          # nice summary pane
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write("### Top picks\n\n")
+              f.write("\n".join(lines))
+              f.write("\n\nCSV: " + ",".join(syms) + "\n")
+          PY
 
       - name: Email weekly picks
         if: ${{ github.event.inputs.mode == 'build' }}
@@ -157,7 +168,15 @@ jobs:
             --picklist backtests/picklist_highrsi_trend.csv \
             --topk "${{ env.TOPK }}"
 
-      # ---------- OPEN / CLOSE (optional) ----------
+      - name: Upload build artifacts
+        if: ${{ github.event.inputs.mode == 'build' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: weekly-picklist
+          path: backtests/picklist_highrsi_trend.csv
+          if-no-files-found: warn
+
+      # --------- OPTIONAL Alpaca ops ----------
       - name: Open positions (Top-K)  — ${{ env.DRY }}
         if: ${{ github.event.inputs.mode == 'open' }}
         shell: bash
