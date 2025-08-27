@@ -85,7 +85,7 @@ jobs:
           echo "TopK : ${{ github.event.inputs.topk || '6' }}"
           date
 
-      # ---------- BUILD PICKLIST ----------
+      # ---------- BUILD ----------
       - name: Build weekly picklist (RSI≥68, rank=rsi, max_ext20=0.15, Top-40/wk)
         if: startsWith(github.event.inputs.mode, 'build') || startsWith(github.event.inputs.mode, 'open') || startsWith(github.event.inputs.mode, 'close')
         run: |
@@ -100,9 +100,32 @@ jobs:
       - name: Preview Top-6 (inline)
         if: startsWith(github.event.inputs.mode, 'build')
         run: |
-          python show_next_picks.py \
-            --picklist backtests/picklist_highrsi_trend.csv \
-            --topk ${{ github.event.inputs.topk || '6' }}
+          python - <<'PY'
+          import os, sys
+          import pandas as pd
+          topk = int(os.getenv('TOPK', '6'))
+          path = 'backtests/picklist_highrsi_trend.csv'
+          try:
+              df = pd.read_csv(path)
+              if 'week_start' not in df.columns or 'symbol' not in df.columns:
+                  raise ValueError("picklist missing required columns (week_start, symbol)")
+              wk = df['week_start'].max()
+              sub = df[df['week_start'] == wk].copy()
+              if 'rank' in sub.columns:
+                  sub = sub.sort_values('rank')
+              elif 'score' in sub.columns:
+                  sub = sub.sort_values('score', ascending=False)
+              syms = sub['symbol'].head(topk).tolist()
+              print(f"Week start: {wk}")
+              for i,s in enumerate(syms, 1):
+                  print(f"{i:>2}  {s}")
+              print("CSV:", ",".join(syms))
+          except Exception as e:
+              print(f"[WARN] Preview failed: {e}")
+              sys.exit(0)
+          PY
+        env:
+          TOPK: ${{ github.event.inputs.topk || '6' }}
 
       # ---------- EMAIL ----------
       - name: EMAIL_SMOKE — send test email (Bcc to SMTP_TO)
