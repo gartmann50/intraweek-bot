@@ -1,76 +1,126 @@
-#!/usr/bin/env python3
-import argparse, os, ssl, smtplib, sys
+# notify_picks.py
+import argparse, csv, ssl, smtplib
 from email.message import EmailMessage
-from datetime import datetime
-import pandas as pd, yaml
+from pathlib import Path
+import pandas as pd
+import yaml
 
-def load_cfg(path):
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f) or {}
+def load_picklist(path: str) -> pd.DataFrame:
+    df = pd.read_csv(path)
+    if 'week_start' not in df.columns or 'symbol' not in df.columns:
+        raise SystemExit(f"Picklist must have columns week_start,symbol. Got: {list(df.columns)}")
+    df['week_start'] = pd.to_datetime(df['week_start']).dt.date
+    return df
 
-def get_smtp(cfg):
-    s = cfg.get("smtp", {}) or {}
-    host = s.get("host") or cfg.get("smtp_host")
-    port = s.get("port") or cfg.get("smtp_port") or 587
-    user = s.get("user") or cfg.get("smtp_user")
-    pw   = s.get("password") or cfg.get("smtp_password")
-    tls  = s.get("starttls", True) if "smtp" in cfg else cfg.get("smtp_starttls", True)
-    from_addr = s.get("from") or cfg.get("smtp_from") or user
-    # recipients: nested list or flat single
-    recips = cfg.get("recipients")
-    if not recips:
-        to = cfg.get("smtp_to")
-        recips = [to] if to else []
-    return host, int(port), user, pw, bool(tls), from_addr, list(recips)
+def load_names() -> dict:
+    """
+    Tries a few locations for a simple mapping: symbol,name
+    If not found, returns {} and we’ll print symbols only.
+    """
+    candidates = [
+        Path("universe/symbol_names.csv"),
+        Path("symbol_names.csv"),
+    ]
+    for p in candidates:
+        if p.exists():
+            m = {}
+            with p.open(newline='', encoding='utf-8') as f:
+                r = csv.DictReader(f)
+                sym_col = 'symbol' if 'symbol' in r.fieldnames else r.fieldnames[0]
+                name_col = 'name' if 'name' in r.fieldnames else r.fieldnames[1]
+                for row in r:
+                    s = (row[sym_col] or '').strip().upper()
+                    n = (row[name_col] or '').strip()
+                    if s:
+                        m[s] = n
+            return m
+    return {}
 
-def build_body(picklist_path, topk):
-    df = pd.read_csv(picklist_path)
-    if "week_start" not in df or "symbol" not in df:
-        raise ValueError("picklist missing columns (week_start, symbol)")
-    wk = df["week_start"].max()
-    sub = df[df["week_start"] == wk].copy()
-    if "rank" in sub:
-        sub = sub.sort_values("rank")
-    elif "score" in sub:
-        sub = sub.sort_values("score", ascending=False)
-    syms = sub["symbol"].head(topk).tolist()
-    lines = [f"Weekly picks — week start {wk}", ""]
-    for i, s in enumerate(syms, 1):
-        lines.append(f"{i:>2}. {s}")
-    lines += ["", "good trading — very good.", "— CEO of Kanute"]
-    return wk, syms, "\n".join(lines)
+def format_email(week: str, symbols: list[str], names: dict, subject_prefix: str):
+    lines = [f"{subject_prefix} — {week}", "", "Top-6:"]
+    for i, sym in enumerate(symbols, 1):
+        nm = names.get(sym, "")
+        name_part = f" — {nm}" if nm else ""
+        lines.append(f"{i}. {sym}{name_part}")
+    lines += [
+        "",
+        f"CSV: {','.join(symbols)}",
+        "",
+        "Good trading — very good.",
+        "",
+        "— CEO of Kanute",
+    ]
+    body = "\n".join(lines)
+    subject = f"{subject_prefix} — {week}"
+    return subject, body
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--config", required=True)
-    ap.add_argument("--picklist", required=True)
-    ap.add_argument("--topk", type=int, default=6)
-    args = ap.parse_args()
+def send_email(cfg: dict, subject: str, body: str):
+    smtp = cfg["smtp"]
+    user = smtp["user"]
+    pwd  = smtp["pass"]
+    host = smtp.get("host", "smtp.gmail.com")
+    port = int(smtp.get("port", 587))
+    to   = smtp["to"]  # list or string
+    from_addr = smtp.get("from", user)
 
-    cfg = load_cfg(args.config)
-    host, port, user, pw, use_tls, from_addr, recips = get_smtp(cfg)
-    if not (host and user and pw and recips):
-        print("Missing SMTP settings in config_notify.yaml", file=sys.stderr)
-        sys.exit(1)
+    if isinstance(to, str):
+        to_list = [t.strip() for t in to.split(",") if t.strip()]
+    else:
+        to_list = list(to)
 
-    wk, syms, body = build_body(args.picklist, args.topk)
     msg = EmailMessage()
-    msg["Subject"] = "Weekly picks"
-    msg["From"] = from_addr or user
-    msg["To"] = user  # send to yourself
-    # hide recipients as Bcc
-    for r in recips:
-        if r and r != user:
-            msg["Bcc"] = (msg.get("Bcc") + "," if msg.get("Bcc") else "") + r
+    msg["From"] = from_addr
+    # Hide recipients: deliver to yourself, Bcc actual list
+    msg["To"] = user
+    msg["Bcc"] = ", ".join(to_list)
+    msg["Subject"] = subject
     msg.set_content(body)
 
     with smtplib.SMTP(host, port, timeout=30) as s:
-        if use_tls:
-            s.starttls(context=ssl.create_default_context())
-        s.login(user, pw)
+        s.starttls(context=ssl.create_default_context())
+        s.login(user, pwd)
         s.send_message(msg)
 
-    print("Sent weekly picks for", wk, "->", syms)
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", default="config_notify.yaml")
+    ap.add_argument("--picklist", default="backtests/picklist_highrsi_trend.csv")
+    ap.add_argument("--topk", type=int, default=6)
+    ap.add_argument("--week", default="latest", help="YYYY-MM-DD or 'latest'")
+    ap.add_argument("--subject-prefix", default="Weekly Picks")
+    ap.add_argument("--dry-run", action="store_true", help="Print email instead of sending")
+    args = ap.parse_args()
+
+    cfg = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
+
+    df = load_picklist(args.picklist)
+    if args.week.lower() == "latest" or not args.week:
+        week_date = df["week_start"].max()
+    else:
+        week_date = pd.to_datetime(args.week).date()
+
+    sel = df[df["week_start"] == week_date].copy()
+    # Keep rank if present, otherwise sort by symbol for stability
+    if "rank" in sel.columns:
+        sel = sel.sort_values(["rank", "symbol"])
+    else:
+        sel = sel.sort_values("symbol")
+
+    symbols = sel["symbol"].head(args.topk).tolist()
+    if not symbols:
+        raise SystemExit(f"No rows for week_start={week_date} in {args.picklist}")
+
+    names = load_names()
+    subject, body = format_email(week_date.isoformat(), symbols, names, args.subject_prefix)
+
+    if args.dry_run:
+        print(subject)
+        print("-" * len(subject))
+        print(body)
+        return
+
+    send_email(cfg, subject, body)
+    print("Email sent.")
 
 if __name__ == "__main__":
     main()
