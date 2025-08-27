@@ -53,16 +53,38 @@ jobs:
         run: |
           mkdir -p backtests notifications artifacts stock_data_400
 
-      - name: Write config_highrsi.yaml
+         - name: Write config_notify.yaml (Gmail, from secrets)
+           env:
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}   # optional; falls back to SMTP_USER
+          SMTP_TO:   ${{ secrets.SMTP_TO }}     # one or many, comma-separated
         run: |
-          cat > config_highrsi.yaml <<'YAML'
-          data_dir: stock_data_400
-          preset: classic
-          rsi_min: 68
-          rank: rsi
-          max_ext20: 0.15
-          top_per_week: 40
-          YAML
+          set -euo pipefail
+
+          # Make YAML with proper quoting
+          {
+            echo "smtp:"
+            echo "  host: smtp.gmail.com"
+            echo "  port: 587"
+            echo "  user: \"${SMTP_USER}\""
+            echo "  pass: \"${SMTP_PASS}\""
+            echo "  from: \"${SMTP_FROM:-$SMTP_USER}\""
+            echo "  to:"
+            IFS=',' read -ra ADDR <<< "${SMTP_TO}"
+            for a in "${ADDR[@]}"; do
+              a_trimmed="$(echo "$a" | xargs)"
+              echo "    - \"${a_trimmed}\""
+            done
+            echo
+            echo "# Optional: poems to append at the end of the email"
+            echo "poems: []"
+          } > config_notify.yaml
+
+      - name: Show config_notify.yaml (redacted)
+        run: |
+          awk '{gsub(/pass:.*/, "pass: ********"); print}' config_notify.yaml
+
 
       - name: Write config_notify.yaml (Gmail, from secrets)
         run: |
