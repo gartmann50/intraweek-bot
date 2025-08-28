@@ -89,16 +89,22 @@ jobs:
           ls stock_data_400/*.csv | wc -l
 
       # --- BUILD PICKLIST ---
-      - name: Build weekly picklist (RSI≥68, ext20≤0.15, Top-40/week)
-        if: ${{ inputs.mode == 'build' || inputs.mode == 'build_and_email' }}
+      - name: Build weekly picklist (RSI>=68, rank=rsi, ext20<=0.15, Top-40/wk)
         run: |
           python build_picklist_parametric.py \
             --data-dir stock_data_400 \
+            --since 2023-01-01 \
+            --until "${UNTIL}" \
             --rsi-min 68 \
+            --rank rsi \
             --max-ext20 0.15 \
             --top-per-week 40 \
-            --until "${{ steps.when.outputs.friday }}" \
             --out backtests/picklist_highrsi_trend.csv
+
+      - name: Check picklist (exists + head)
+        run: |
+          ls -lh backtests || true
+          python -c "import pandas as pd, pathlib, sys; p=pathlib.Path('backtests/picklist_highrsi_trend.csv'); print('exists:', p.exists(), 'size:', p.stat().st_size if p.exists() else 0); (not p.exists()) and sys.exit(1); df=pd.read_csv(p); print('rows:', len(df)); print(df.head(10).to_string(index=False)); sys.exit(0 if len(df) else 1)"
 
       - name: Preview Top-6 in logs + save file
         if: ${{ inputs.mode == 'build' || inputs.mode == 'build_and_email' }}
