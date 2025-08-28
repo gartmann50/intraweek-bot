@@ -324,45 +324,6 @@ jobs:
         run: |
           python tools/post_filter_rerank.py --pick backtests/picklist_highrsi_trend.csv --exclude-file universe/exclude.txt
 
-      - name: Guard — enforce RSI-desc order for all weeks
-        shell: python
-        run: |
-          import pandas as pd, sys
-          p = 'backtests/picklist_highrsi_trend.csv'
-          df = pd.read_csv(p)
-          wk = 'week_start' if 'week_start' in df.columns else ('week' if 'week' in df.columns else None)
-          if wk is None: 
-            print('No week column, aborting guard.'); sys.exit(1)
-            # Prefer RSI-like score; fallback to rank; last resort by symbol (but we rebuild rank)
-           score_cols = ['score','f_rsi14','rsi14','rsi_14','RSI','rsi','rsi14_score','f_rsi_14']
-           use = None
-           for c in score_cols:
-             if c in df.columns:
-               s = pd.to_numeric(df[c], errors='coerce')
-               if s.notna().any():
-                 df[c] = s
-                 use = c
-                 break
-            if use:
-              df = df.sort_values([wk, use, 'symbol'], ascending=[True, False, True], kind='stable')
-              df['rank'] = df.groupby(wk).cumcount() + 1
-              print(f'Guard: sorted by {use} desc; ranks rebuilt.')
-            elif 'rank' in df.columns:
-              df['rank'] = pd.to_numeric(df['rank'], errors='coerce').fillna(1e9)
-              df = df.sort_values([wk,'rank','symbol'], ascending=[True,True,True], kind='stable')
-              df['rank'] = df.groupby(wk).cumcount() + 1
-              print('Guard: sorted by rank asc; ranks rebuilt.')
-            else:
-               df = df.sort_values([wk,'symbol'], ascending=[True,True], kind='stable')
-               df['rank'] = df.groupby(wk).cumcount() + 1
-               print('Guard: WARNING no score/rank; sorted by symbol, ranks rebuilt.')
-            df.to_csv(p, index=False)
-            # show top 10 of last week for verification
-            last = pd.to_datetime(df[wk], errors='coerce').dropna().max()
-            sub = df[pd.to_datetime(df[wk], errors='coerce')==last]
-            cols = [c for c in ['symbol','rank','score','f_rsi14','RSI'] if c in sub.columns]
-            print(sub.head(10)[cols].to_string(index=False))
-
       - name: Derive WEEK from picklist (compact)
         shell: python
         run: |
