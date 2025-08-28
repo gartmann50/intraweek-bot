@@ -152,8 +152,35 @@ jobs:
         run: |
           python notify_picks.py --config config_notify_ci.yaml --smoke
 
+      - name: Write config_notify.yaml (from secrets)
+        run: |
+          cat > config_notify.yaml <<'YAML'
+          smtp_user: ${{ secrets.SMTP_USER }}
+          smtp_pass: ${{ secrets.SMTP_PASS }}
+          smtp_to:   ${{ secrets.SMTP_TO }}
+          smtp_from: ${{ secrets.SMTP_FROM }}
+          host: smtp.gmail.com
+          port: 587
+          use_tls: true
+          YAML
+
+      - name: Show config_notify.yaml (redacted)
+        run: |
+          python - <<'PY'
+          import yaml
+          with open('config_notify.yaml') as f:
+               cfg = yaml.safe_load(f)
+          red = {k: ('***' if 'pass' in k or 'user' in k else v) for k,v in cfg.items()}
+          print(red)
+          PY    
+
+
       - name: Email weekly picks (poem + full names, BCC recipients)
-        if: ${{ inputs.mode == 'build' || inputs.mode == 'build_and_email' || inputs.mode == 'email_only' }}
+        env:
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_TO:   ${{ secrets.SMTP_TO }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
         run: |
           python notify_picks.py \
           --config config_notify.yaml \
