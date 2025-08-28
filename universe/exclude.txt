@@ -1,3 +1,10 @@
-﻿# One symbol per line. Examples below — edit as you like:
+﻿# one symbol per line (UPPERCASE)
 SPLK
 SGEN
+SPY
+QQQ
+IWM
+VOO
+VTI
+DIA
+XLK
