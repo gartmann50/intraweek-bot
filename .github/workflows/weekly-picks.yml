@@ -166,13 +166,7 @@ jobs:
 
       - name: Show config_notify.yaml (redacted)
         run: |
-          python - <<'PY'
-          import yaml
-          with open('config_notify.yaml') as f:
-               cfg = yaml.safe_load(f)
-          red = {k: ('***' if 'pass' in k or 'user' in k else v) for k,v in cfg.items()}
-          print(red)
-      PY    
+          python -c "import yaml, pathlib; cfg=yaml.safe_load(pathlib.Path('config_notify.yaml').read_text()) or {}; print({k:('***' if any(s in k for s in ('pass','user','key','token')) else v) for k,v in cfg.items()})"
 
 
       - name: Email weekly picks (poem + full names, BCC recipients)
