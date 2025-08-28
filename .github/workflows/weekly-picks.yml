@@ -153,10 +153,10 @@ jobs:
           python notify_picks.py --config config_notify_ci.yaml --smoke
 
       - name: Email weekly picks (poem + full names, BCC recipients)
-        if: ${{ inputs.mode == 'build_and_email' }}
+        if: ${{ inputs.mode == 'build' || inputs.mode == 'build_and_email' || inputs.mode == 'email_only' }}
         run: |
           python notify_picks.py \
-            --config config_notify_ci.yaml \
-            --picklist backtests/picklist_highrsi_trend.csv \
-            --topk "${{ inputs.topk }}" \
-            --until "${{ steps.when.outputs.friday }}"
+          --config config_notify.yaml \
+          --picklist backtests/picklist_highrsi_trend.csv \
+          --topk "${{ inputs.topk || 6 }}" \
+          --week "${{ steps.when.outputs.friday }}"
