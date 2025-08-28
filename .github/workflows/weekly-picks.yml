@@ -88,6 +88,41 @@ jobs:
           echo "Sanity OK. CSV count:"
           ls stock_data_400/*.csv | wc -l
 
+      - name: Unpack EOD dataset if zip present
+        if: hashFiles('stock_data_400.zip') != ''
+        run: |
+          python - <<'PY'
+          import os, zipfile, shutil
+          z = zipfile.ZipFile('stock_data_400.zip')
+          os.makedirs('stock_data_400', exist_ok=True)
+          z.extractall('stock_data_400')
+          # If files were zipped inside a subfolder, move CSVs up one level
+          moved = 0
+          for root, _, files in os.walk('stock_data_400'):
+            for f in files:
+              if f.lower().endswith('.csv'):
+                src = os.path.join(root, f)
+                dst = os.path.join('stock_data_400', f)
+                if src != dst:
+                    shutil.move(src, dst); moved += 1
+          csvs = [p for p in os.listdir('stock_data_400') if p.lower().endswith('.csv')]
+           print("Unzipped CSVs:", len(csvs), " (moved:", moved, ")")
+           PY
+
+      - name: Sanity — count & peek one CSV
+        run: |
+          python - <<'PY'
+          import glob, pandas as pd
+          files = sorted(glob.glob('stock_data_400/*.csv'))
+          print("Found", len(files), "CSV files in stock_data_400/")
+          if files:
+            print("Sample:", files[0])
+            df = pd.read_csv(files[0]).head()
+            print(df.to_string(index=False))
+          else:
+            raise SystemExit("No CSVs found after unzip")
+          PY
+
       # --- BUILD PICKLIST ---
       - name: Build weekly picklist (RSI≥68, rank=rsi, ext20≤0.15, Top-40/wk)
         run: |
