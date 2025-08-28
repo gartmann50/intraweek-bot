@@ -324,19 +324,6 @@ jobs:
         run: |
           python tools/post_filter_rerank.py --pick backtests/picklist_highrsi_trend.csv --exclude-file universe/exclude.txt
 
-      - name: Sanity — show Top-6 (score-desc) for latest week
-        shell: python
-        run: |
-          import pandas as pd
-          df = pd.read_csv("backtests/picklist_highrsi_trend.csv")
-          wkcol = "week_start" if "week_start" in df.columns else "week"
-          last = pd.to_datetime(df[wkcol], errors="coerce").dt.date.max()
-          sub = df[pd.to_datetime(df[wkcol], errors="coerce").dt.date==last].copy()
-          if "score" in sub.columns:
-           sub["score"] = pd.to_numeric(sub["score"], errors="coerce")
-           sub = sub.sort_values("score", ascending=False, kind="stable")
-             print(sub.head(6)[["symbol","rank","score","filters"]].to_string(index=False))
-
       - name: Derive WEEK from picklist (compact)
         shell: python
         run: |
