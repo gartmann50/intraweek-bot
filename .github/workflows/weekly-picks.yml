@@ -89,16 +89,14 @@ jobs:
           ls stock_data_400/*.csv | wc -l
 
       # --- BUILD PICKLIST ---
-      - name: Build weekly picklist (RSI>=68, rank=rsi, ext20<=0.15, Top-40/wk)
+      - name: Build weekly picklist (RSI≥68, rank=rsi, ext20≤0.15, Top-40/wk)
         run: |
           python build_picklist_parametric.py \
             --data-dir stock_data_400 \
-            --since 2023-01-01 \
-            --until "${UNTIL}" \
             --rsi-min 68 \
-            --rank rsi \
             --max-ext20 0.15 \
             --top-per-week 40 \
+            --until "${UNTIL}" \
             --out backtests/picklist_highrsi_trend.csv
 
       - name: Check picklist (exists + head)
