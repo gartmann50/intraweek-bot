@@ -1,237 +1,165 @@
-name: Weekly Picks (manual)
+name: Weekly Picks
 
 on:
   workflow_dispatch:
     inputs:
       mode:
-        type: choice
-        description: What to run
-        options: [status, build, email_smoke]
+        description: "Choose: status, build, email_smoke, build_and_email"
         required: true
-        default: build
+        default: build_and_email
+        type: choice
+        options:
+          - status
+          - build
+          - email_smoke
+          - build_and_email
       until:
-        description: Override "until" date (YYYY-MM-DD). Blank = today (Oslo)
+        description: "Override Friday (YYYY-MM-DD). Leave empty to auto-pick last Friday (Oslo)"
         required: false
-        default: ""
+        type: string
       topk:
-        description: How many symbols to show/send
+        description: "How many names to show/email"
         required: false
         default: "6"
+        type: string
 
 jobs:
-  run:
+  main:
     runs-on: ubuntu-latest
-    env:
-      TZ: Europe/Oslo
+    permissions:
+      contents: read
 
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      - name: Install Python deps
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy pyyaml pytz tzdata requests
+          pip install pandas numpy pyyaml
 
-      - name: Compute UNTIL date and shell flags
-        id: compute
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -z "${{ github.event.inputs.until || '' }}" ]]; then
-            UNTIL=$(TZ=Europe/Oslo date +%F)
-          else
-            UNTIL="${{ github.event.inputs.until }}"
-          fi
-          echo "UNTIL=$UNTIL" >> $GITHUB_ENV
-          echo "TOPK=${{ github.event.inputs.topk || '6' }}" >> $GITHUB_ENV
-
-      - name: Ensure folders
-        run: |
-          mkdir -p backtests stock_data_400 notifications
-
-      # ----- EMAIL CONFIG FROM SECRETS (Gmail) -----
-      - name: Write config_notify.yaml (Gmail, from secrets)
-        env:
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
-          SMTP_FROM: ${{ secrets.SMTP_FROM }}
-          SMTP_TO:   ${{ secrets.SMTP_TO }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          : "${SMTP_USER:?Missing secret SMTP_USER}"
-          : "${SMTP_PASS:?Missing secret SMTP_PASS}"
-          : "${SMTP_TO:?Missing secret SMTP_TO}"
-          {
-            echo "smtp:"
-            echo "  host: smtp.gmail.com"
-            echo "  port: 587"
-            echo "  user: \"${SMTP_USER}\""
-            echo "  pass: \"${SMTP_PASS}\""
-            echo "  from: \"${SMTP_FROM:-$SMTP_USER}\""
-            echo "  to:"
-            IFS=',' read -ra ADDR <<< "${SMTP_TO}"
-            for a in "${ADDR[@]}"; do
-              a_trimmed="$(echo "$a" | xargs)"
-              echo "    - \"${a_trimmed}\""
-            done
-            echo "poems: []"
-          } > config_notify.yaml
-
-      - name: Show config_notify.yaml (redacted)
-        shell: bash
-        run: |
-          sed -E 's/(pass: ).*/\1********/' config_notify.yaml
-
-      - name: STATUS — show inputs and time
-        if: ${{ github.event.inputs.mode == 'status' }}
-        run: |
-          echo "UNTIL=${UNTIL}"; echo "TOPK=${TOPK}"; date
-
-      # ----- BUILD PICKLIST -----
-      - name: Build weekly picklist (RSI>=68, rank=rsi, max_ext20=0.15, Top-40/wk)
-        if: ${{ github.event.inputs.mode == 'build' }}
-        shell: bash
-        run: |
-          python build_picklist_parametric.py \
-            --data-dir stock_data_400 \
-            --out backtests/picklist_highrsi_trend.csv \
-            --rsi-min 68 \
-            --max-ext20 0.15 \
-            --top-per-week 40 \
-            --until "${UNTIL}"
-
-      # ----- INLINE PREVIEW (no external script needed) -----
-      - name: Preview Top-6 (inline)
-        shell: bash
+      - name: Compute last Friday (Europe/Oslo)
+        id: when
         run: |
           python - <<'PY'
-          import pandas as pd
-          from datetime import datetime, timezone, date
-          from pathlib import Path
-          import os, sys
-
-          PICKLIST = os.environ.get("PICKLIST", "backtests/picklist_highrsi_trend.csv")
-          TOPK = int(os.environ.get("TOPK", "6"))
-          # If your workflow computes UNTIL (e.g., YYYY-MM-DD for Oslo “today”), we’ll use it;
-          # otherwise we fallback to local “today”.
-          UNTIL = os.environ.get("UNTIL", "")
-
-    def today_local() -> date:
-        return datetime.now(timezone.utc).astimezone().date()
-
-    def choose_week(ws, override):
-        if override:
-            try:
-                want = pd.to_datetime(override, errors="raise").date()
-            except Exception:
-                return None
-              return want if want in set(ws) else None
-             t = today_local()
-             future = ws[ws >= t]
-        if len(future):
-            return min(future)
-            past = ws[ws <= t]
-            return max(past) if len(past) else None
-
-    p = Path(PICKLIST)
-    if not p.exists():
-        print(f"::warning::Picklist not found: {p}")
-        sys.exit(0)
-
-    df_raw = pd.read_csv(p)
-    if "week_start" not in df_raw.columns:
-        print("::warning::Picklist missing 'week_start' column")
-        sys.exit(0)
-
-    df = df_raw.copy()
-    df["week_start_date"] = pd.to_datetime(df["week_start"], errors="coerce").dt.date
-    ws = df["week_start_date"].dropna()
-    if ws.empty:
-        print("::warning::No valid dates in week_start")
-        sys.exit(0)
-
-    wk = choose_week(ws, UNTIL)
-    if wk is None:
-        print(f"::warning::Could not choose a week. Last few weeks: {sorted(set(ws))[-10:]}")
-        sys.exit(0)
-
-    block = df[df["week_start_date"] == wk].copy()
-    if block.empty:
-        print(f"::warning::No rows for week_start={wk}")
-        sys.exit(0)
-
-    sym_col = "symbol" if "symbol" in block.columns else ("ticker" if "ticker" in block.columns else None)
-    if not sym_col:
-        print("::warning::Picklist needs 'symbol' or 'ticker' column")
-        sys.exit(0)
-
-    # Sort by rank (asc) if present, else by score (desc) if present
-    if "rank" in block.columns:
-        block = block.sort_values("rank", ascending=True)
-    elif "score" in block.columns:
-        block = block.sort_values("score", ascending=False)
-
-    top = [str(x).strip().upper() for x in block[sym_col].head(TOPK).tolist()]
-    print(f"\n=== Weekly picks — week of {wk} ===")
-    if not top:
-        print("::warning::Top-K list is empty after filtering/sorting.")
-        sys.exit(0)
-
-    for i, s in enumerate(top, 1):
-        print(f"{i:>2}. {s}")
-    print(f"\nCSV: {','.join(top)}\n")
-    PY
-  env:
-    PICKLIST: backtests/picklist_highrsi_trend.csv
-    TOPK: ${{ inputs.topk || '6' }}
-    # If your workflow already computes an UNTIL date, pass it:
-    UNTIL: ${{ steps.until.outputs.date || '' }}
-
-
-      - name: EMAIL_SMOKE — send test email (Bcc to SMTP_TO)
-        if: ${{ github.event.inputs.mode == 'email_smoke' }}
-        env:
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
-          SMTP_FROM: ${{ secrets.SMTP_FROM }}
-          SMTP_TO:   ${{ secrets.SMTP_TO }}
-        shell: bash
-        run: |
-          python - <<'PY'
-          import os, smtplib, ssl
-          from email.message import EmailMessage
-          to=os.environ.get("SMTP_TO","")
-          to=[x.strip() for x in to.split(",") if x.strip()]
-          msg=EmailMessage()
-          msg["Subject"]="Smoke test from GitHub Actions"
-          msg["From"]=os.environ.get("SMTP_FROM") or os.environ["SMTP_USER"]
-          msg["To"]=os.environ["SMTP_USER"]
-          if to: msg["Bcc"]=",".join(to)
-          msg.set_content("Smoke test OK.")
-          with smtplib.SMTP("smtp.gmail.com",587) as s:
-              s.starttls(context=ssl.create_default_context())
-              s.login(os.environ["SMTP_USER"],os.environ["SMTP_PASS"])
-              s.send_message(msg)
+          from datetime import datetime, timedelta
+          import zoneinfo, os, json
+          tz = zoneinfo.ZoneInfo("Europe/Oslo")
+          now = datetime.now(tz)
+          # If user supplied --until, use that, else compute last Friday
+          override = "${{ inputs.until }}".strip()
+          if override:
+            fri = override
+          else:
+            d = now.date()
+            # step back to previous Friday (including today if Fri)
+            while d.weekday() != 4:
+              d -= timedelta(days=1)
+            fri = d.isoformat()
+          # next Monday after that Friday
+          f = datetime.fromisoformat(fri).date()
+          next_mon = f + timedelta(days=3)
+          print("FRI=", fri)
+          print("MON=", next_mon.isoformat())
+          with open("runner_dates.json","w") as fjson:
+            json.dump({"friday": fri, "next_monday": next_mon.isoformat()}, fjson)
+          print(f"::set-output name=friday::{fri}")
+          print(f"::set-output name=monday::{next_mon.isoformat()}")
           PY
 
-      - name: Email weekly picks
-  # only send on a build/open/close run; keep if-condition you already use
-        if: ${{ github.event.inputs.mode == 'build' || startsWith(github.event.inputs.mode, 'open_') || startsWith(github.event.inputs.mode, 'close') }}
+      # Always show a quick repo tree to help debugging
+      - name: Quick tree
+        run: |
+          echo "Top-level files:"
+          ls -la
+          echo ""
+          echo "Data dir (stock_data_400):"
+          ls -la stock_data_400 | head -n 40 || true
+
+      # --- STATUS (sanity) ---
+      - name: Status (sanity only)
+        if: ${{ inputs.mode == 'status' }}
+        run: |
+          echo "Sanity OK. CSV count:"
+          ls stock_data_400/*.csv | wc -l
+
+      # --- BUILD PICKLIST ---
+      - name: Build weekly picklist (classic RSI≥68, ext20≤0.15, Top-40/week)
+        if: ${{ inputs.mode == 'build' || inputs.mode == 'build_and_email' }}
+        run: |
+          python build_picklist_parametric.py \
+            --config config_highrsi.yaml \
+            --since 2020-01-01 \
+            --until "${{ steps.when.outputs.friday }}" \
+            --preset classic \
+            --rsi-min 68 \
+            --rank rsi \
+            --max-ext20 0.15 \
+            --top-per-week 40 \
+            --out backtests/picklist_highrsi_trend.csv
+
+      - name: Preview Top-6 in logs + save file
+        if: ${{ inputs.mode == 'build' || inputs.mode == 'build_and_email' }}
+        run: |
+          python preview_top6.py \
+            --picklist backtests/picklist_highrsi_trend.csv \
+            --topk "${{ inputs.topk }}" \
+            --until "${{ steps.when.outputs.friday }}" | tee backtests/top6_preview.txt
+
+          echo "== Tail of picklist =="
+          tail -n 20 backtests/picklist_highrsi_trend.csv || true
+
+      - name: Upload artifacts (picklist + preview)
+        if: ${{ inputs.mode == 'build' || inputs.mode == 'build_and_email' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: weekly-picks-${{ steps.when.outputs.friday }}
+          path: |
+            backtests/picklist_highrsi_trend.csv
+            backtests/top6_preview.txt
+            runner_dates.json
+
+      # --- EMAIL (smoke or real) ---
+      - name: Create email config from secrets
+        if: ${{ inputs.mode == 'email_smoke' || inputs.mode == 'build_and_email' }}
         env:
-    # feed secrets to the script via environment (no need for a config file)
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
-          SMTP_TO:   ${{ secrets.SMTP_TO }}
-          SMTP_FROM: ${{ secrets.SMTP_FROM }}
-          TOPK:      ${{ github.event.inputs.topk || '6' }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASS: ${{ secrets.GMAIL_APP_PASS }}
+          MAIL_FROM: ${{ secrets.MAIL_FROM }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+        run: |
+          python - <<'PY'
+          import os, json, pathlib, sys, yaml
+          out = {
+            "smtp": {
+              "host": "smtp.gmail.com",
+              "port": 587,
+              "user": os.environ.get("GMAIL_USER",""),
+              "pass": os.environ.get("GMAIL_APP_PASS",""),
+            },
+            "from": os.environ.get("MAIL_FROM",""),
+            # allow comma or semicolon separated
+            "to": [e.strip() for e in os.environ.get("MAIL_TO","").replace(";",",").split(",") if e.strip()]
+          }
+          pathlib.Path("config_notify_ci.yaml").write_text(yaml.safe_dump(out, sort_keys=False), encoding="utf-8")
+          print("Wrote config_notify_ci.yaml with", len(out["to"]), "recipient(s).")
+          PY
+
+      - name: Email smoke (short test)
+        if: ${{ inputs.mode == 'email_smoke' }}
+        run: |
+          python notify_picks.py --config config_notify_ci.yaml --smoke
+
+      - name: Email weekly picks (poem + full names, BCC recipients)
+        if: ${{ inputs.mode == 'build_and_email' }}
         run: |
           python notify_picks.py \
+            --config config_notify_ci.yaml \
             --picklist backtests/picklist_highrsi_trend.csv \
-            --topk "${TOPK}"
+            --topk "${{ inputs.topk }}" \
+            --until "${{ steps.when.outputs.friday }}"
