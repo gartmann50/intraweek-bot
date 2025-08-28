@@ -1,6 +1,21 @@
 ﻿#!/usr/bin/env python3
 import argparse, pathlib, pandas as pd
 
+CANDIDATE_SCORE_COLS = [
+    "score","f_rsi14","rsi14","rsi_14","RSI","rsi","rsi14_score","f_rsi_14"
+]
+
+def pick_numeric_column(df, names):
+    cols = {c.lower(): c for c in df.columns}
+    for name in names:
+        c = cols.get(name.lower())
+        if not c: 
+            continue
+        s = pd.to_numeric(df[c], errors="coerce")
+        if s.notna().any():
+            return c, s
+    return None, None
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--pick", default="backtests/picklist_highrsi_trend.csv")
@@ -10,6 +25,7 @@ def main():
     pick = pathlib.Path(args.pick)
     df = pd.read_csv(pick)
 
+    # 1) Exclude symbols (defaults + file)
     defaults = {"SPLK","SGEN","SPY","QQQ","IWM","VOO","VTI","DIA","XLK"}
     exfile = pathlib.Path(args.exclude_file)
     exfile.parent.mkdir(parents=True, exist_ok=True)
@@ -31,23 +47,26 @@ def main():
     if not wkcol:
         raise SystemExit("picklist missing week column")
 
-    # Prefer RSI score for order; fallback to rank; rebuild ranks
-    if "score" in df.columns:
-        df["__score"] = pd.to_numeric(df["score"], errors="coerce").fillna(-1e9)
-        df = df.sort_values([wkcol, "__score", "symbol"], ascending=[True, False, True], kind="stable").drop(columns="__score")
+    # 2) Prefer an RSI-like score column; else use rank; else symbol
+    score_col, score_series = pick_numeric_column(df, CANDIDATE_SCORE_COLS)
+    method = None
+    if score_col:
+        df["__score"] = pd.to_numeric(df[score_col], errors="coerce").fillna(-1e9)
+        df = df.sort_values([wkcol,"__score","symbol"], ascending=[True,False,True], kind="stable").drop(columns="__score")
+        method = f"score:{score_col}"
+        # rebuild ranks strictly from this order
         df["rank"] = df.groupby(wkcol).cumcount() + 1
-        method = "score"
     elif "rank" in df.columns:
         df["__rank"] = pd.to_numeric(df["rank"], errors="coerce").fillna(1e9)
-        df = df.sort_values([wkcol, "__rank", "symbol"], ascending=[True, True, True], kind="stable").drop(columns="__rank")
-        df["rank"] = df.groupby(wkcol).cumcount() + 1
+        df = df.sort_values([wkcol,"__rank","symbol"], ascending=[True,True,True], kind="stable").drop(columns="__rank")
         method = "rank"
+        df["rank"] = df.groupby(wkcol).cumcount() + 1
     else:
-        df = df.sort_values([wkcol, "symbol"], ascending=[True, True], kind="stable")
+        df = df.sort_values([wkcol,"symbol"], ascending=[True,True], kind="stable")
         method = "symbol-only"
 
     df.to_csv(pick, index=False)
-    print(f"Excluded {removed} rows; kept {len(df)}. Re-ranked by {method}.")
+    print(f"Excluded {removed} rows; kept {len(df)}. Re-ranked by {method}. Columns: {list(df.columns)}")
 
 if __name__ == "__main__":
     main()
