@@ -229,5 +229,5 @@ jobs:
           python notify_picks.py \
             --config config_notify.yaml \
             --picklist backtests/picklist_highrsi_trend.csv \
-            --topk "${TOPK}" \
+            --topk ${{ inputs.topk != '' && inputs.topk || '6' }} \
             --week "${WEEK}"
