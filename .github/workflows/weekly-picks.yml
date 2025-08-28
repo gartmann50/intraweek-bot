@@ -321,63 +321,20 @@ jobs:
             --until "${{ steps.when.outputs.friday }}" \
             --out backtests/picklist_highrsi_trend.csv
 
-      - name: Drop excluded symbols (SGEN/SPLK/ETFs) and re-rank
+    
+
+      - name: Sanity — show Top-6 (score-desc) for latest week
         shell: python
         run: |
-          import pathlib, pandas as pd
-
-          pick = pathlib.Path("backtests/picklist_highrsi_trend.csv")
-          df = pd.read_csv(pick)
-
-          # defaults + repo file (optional)
-          defaults = {"SPLK","SGEN","SPY","QQQ","IWM","VOO","VTI","DIA","XLK"}
-          exfile = pathlib.Path("universe/exclude.txt")
-          exfile.parent.mkdir(parents=True, exist_ok=True)
-          file_syms = set()
-          if exfile.exists():
-            file_syms = {s.strip().upper() for s in exfile.read_text(encoding="utf-8").splitlines()
-                   if s.strip() and not s.strip().startswith("#")}
-          excl = defaults | file_syms
-
-          if "symbol" not in df.columns:
-            raise SystemExit("picklist missing 'symbol'")
-          df["__UP"] = df["symbol"].str.upper()
-          before = len(df)
-          df = df[~df["__UP"].isin(excl)].drop(columns="__UP")
-          removed = before - len(df)
-
-          wkcol = "week_start" if "week_start" in df.columns else ("week" if "week" in df.columns else None)
-          if not wkcol:
-            raise SystemExit("picklist missing week column")
-
-        # KEY: prefer score (RSI) for order; fallback to rank; then rebuild ranks
-if "score" in df.columns:
-            df["__score"] = pd.to_numeric(df["score"], errors="coerce").fillna(-1e9)
-            df = df.sort_values([wkcol, "__score", "symbol"], ascending=[True, False, True], kind="stable").drop(columns="__score")
-            df["rank"] = df.groupby(wkcol).cumcount() + 1
-          elif "rank" in df.columns:
-            df["__rank"]  = pd.to_numeric(df["rank"], errors="coerce").fillna(1e9)
-             df = df.sort_values([wkcol, "__rank", "symbol"], ascending=[True, True, True], kind="stable").drop(columns="__rank")
-            df["rank"] = df.groupby(wkcol).cumcount() + 1
-           else:
-             print("WARNING: no 'score' or 'rank' column; sorting by symbol only.")
-              df = df.sort_values([wkcol, "symbol"], ascending=[True, True], kind="stable")
-
-           df.to_csv(pick, index=False)
-           print(f"Excluded {removed} rows; kept {len(df)}. Re-ranked by {'score' if 'score' in df.columns else 'rank'}.")
-
-     - name: Sanity — show Top-6 (score-desc) for latest week
-       shell: python
-       run: |
-         import pandas as pd
-        df = pd.read_csv("backtests/picklist_highrsi_trend.csv")
-        wkcol = "week_start" if "week_start" in df.columns else "week"
-        last = pd.to_datetime(df[wkcol], errors="coerce").dt.date.max()
-        sub = df[pd.to_datetime(df[wkcol], errors="coerce").dt.date==last].copy()
-        if "score" in sub.columns:
+          import pandas as pd
+          df = pd.read_csv("backtests/picklist_highrsi_trend.csv")
+          wkcol = "week_start" if "week_start" in df.columns else "week"
+          last = pd.to_datetime(df[wkcol], errors="coerce").dt.date.max()
+          sub = df[pd.to_datetime(df[wkcol], errors="coerce").dt.date==last].copy()
+          if "score" in sub.columns:
            sub["score"] = pd.to_numeric(sub["score"], errors="coerce")
            sub = sub.sort_values("score", ascending=False, kind="stable")
-        print(sub.head(6)[["symbol","rank","score","filters"]].to_string(index=False))
+             print(sub.head(6)[["symbol","rank","score","filters"]].to_string(index=False))
 
       - name: Derive WEEK from picklist (compact)
         shell: python
