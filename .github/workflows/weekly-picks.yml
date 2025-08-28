@@ -317,11 +317,12 @@ jobs:
             --rsi-min 68 \
             --max-ext20 0.15 \
             --top-per-week 40 \
-            --rank rsi \
             --until "${{ steps.when.outputs.friday }}" \
             --out backtests/picklist_highrsi_trend.csv
 
-    
+      - name: Drop excluded symbols and re-rank by RSI (script)
+        run: |
+          python tools/post_filter_rerank.py --pick backtests/picklist_highrsi_trend.csv --exclude-file universe/exclude.txt
 
       - name: Sanity — show Top-6 (score-desc) for latest week
         shell: python
