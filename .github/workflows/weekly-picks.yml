@@ -132,34 +132,18 @@ jobs:
             --until "${UNTIL}" \
             --out backtests/picklist_highrsi_trend.csv
 
-      - name: Derive WEEK from picklist
+      - name: Derive WEEK from picklist (compact)
         shell: python
         run: |
           import os, sys, pandas as pd
-
-          path = 'backtests/picklist_highrsi_trend.csv'
-          df = pd.read_csv(path)
-
-          if df.empty:
-             print('ERROR: picklist is empty'); sys.exit(1)
-
-    # Accept either 'week_start' or 'week'
-    if 'week_start' in df.columns:
-           col = 'week_start'
-        elif 'week' in df.columns:
-         col = 'week'
-        else:
-            print('ERROR: no week column found'); sys.exit(1)
-
-              dates = pd.to_datetime(df[col], errors='coerce').dropna().dt.date
-        if dates.empty:
-            print('ERROR: no parsable dates in', col); sys.exit(1)
-
-              week = max(dates.unique())
-              print('Chosen WEEK:', week)
-
-      with open(os.environ['GITHUB_ENV'], 'a') as f:
-         f.write(f'WEEK={week}\n')
+          path='backtests/picklist_highrsi_trend.csv'; df=pd.read_csv(path)
+          if df.empty: print('ERROR: picklist is empty'); sys.exit(1)
+          col='week_start' if 'week_start' in df.columns else ('week' if 'week' in df.columns else None)
+          if not col: print('ERROR: no week column found'); sys.exit(1)
+          dates=pd.to_datetime(df[col], errors='coerce').dropna().dt.date
+          if dates.empty: print('ERROR: no parsable dates in', col); sys.exit(1)
+          week=max(dates.unique()); print('Chosen WEEK:', week)
+          open(os.environ['GITHUB_ENV'],'a').write(f'WEEK={week}\n')
       
       - name: Check picklist (exists + head)
         run: |
