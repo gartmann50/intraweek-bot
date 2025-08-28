@@ -172,7 +172,7 @@ jobs:
                cfg = yaml.safe_load(f)
           red = {k: ('***' if 'pass' in k or 'user' in k else v) for k,v in cfg.items()}
           print(red)
-          PY    
+      PY    
 
 
       - name: Email weekly picks (poem + full names, BCC recipients)
