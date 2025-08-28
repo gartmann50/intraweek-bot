@@ -108,6 +108,70 @@ jobs:
           csvs = [p for p in os.listdir('stock_data_400') if p.lower().endswith('.csv')]
           print("Unzipped CSVs:", len(csvs), "(moved:", moved, ")")
 
+      - name: Generate equities-only universe (from dataset + exclude list)
+        shell: python
+        run: |
+          import os, csv, glob, pathlib, datetime as dt
+          import pandas as pd
+
+          data_dir = "stock_data_400"
+          uni_dir  = pathlib.Path("universe"); uni_dir.mkdir(exist_ok=True, parents=True)
+          exclude_file = uni_dir / "exclude.txt"
+          out_file = uni_dir / "top400_weekly.generated.csv"
+
+          # Make sure exclude list exists (you can edit it in the repo anytime)
+          if not exclude_file.exists():
+              exclude_file.write_text(
+                  "# One symbol per line (UPPERCASE). ETFs/funds/delisted here are dropped every run.\n"
+                  "SPY\nQQQ\nIWM\nVOO\nVTI\nDIA\nXLK\nXLE\nXLV\nXLF\n"
+                  "SPLK\nSGEN\n", encoding="utf-8"
+              )
+
+          # 1) collect symbols from filenames in dataset (handles TICKER.csv or TICKER_*.csv)
+          symbols = set()
+          for p in glob.glob(os.path.join(data_dir, "*.csv")):
+              base = pathlib.Path(p).stem
+              sym = base.split("_")[0].upper()
+              symbols.add(sym)
+
+          # 2) remove excluded
+          exclude = {line.strip().upper() for line in exclude_file.read_text(encoding="utf-8").splitlines()
+                     if line.strip() and not line.strip().startswith("#")}
+          symbols -= exclude
+
+          # 3) drop stale/delisted: if last row date is older than cutoff (e.g., 120 days before dataset max)
+          last_dates = {}
+          dataset_last = dt.date(1970,1,1)
+          for sym in list(symbols):
+              # try both TICKER.csv and TICKER_*.csv
+              candidates = sorted(glob.glob(os.path.join(data_dir, f"{sym}*.csv")))
+              if not candidates: continue
+              try:
+                  df = pd.read_csv(candidates[0])
+                  if df.empty: continue
+                  # assume first column is date
+                  d = pd.to_datetime(df.iloc[-1, 0], errors="coerce")
+                  if pd.notna(d):
+                      dd = d.date()
+                      last_dates[sym] = dd
+                      if dd > dataset_last: dataset_last = dd
+              except Exception:
+                  pass
+
+          cutoff = dataset_last - dt.timedelta(days=120)
+          symbols = {s for s in symbols if s in last_dates and last_dates[s] >= cutoff}
+
+          # 4) write universe CSV
+          with out_file.open("w", newline="") as f:
+              w = csv.DictWriter(f, fieldnames=["symbol"])
+              w.writeheader()
+              for s in sorted(symbols):
+                  w.writerow({"symbol": s})
+
+          print(f"Universe → {out_file}  kept={len(symbols)}  excluded={len(exclude)}  cutoff={cutoff}")
+          if len(symbols) == 0:
+              raise SystemExit("Universe is empty after filtering; aborting.")
+
       - name: Sanity — count & peek one CSV
         shell: python
         run: |
