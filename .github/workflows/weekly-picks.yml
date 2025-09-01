@@ -132,6 +132,31 @@ jobs:
           else:
               print("We're within the post-open window; continuing immediately.")
 
+      - name: Execute Monday buys (Alpaca)
+        if: ${{ github.event_name == 'schedule' }}   # only on cron
+        env:
+          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          ALPACA_ENV:    paper          # change to 'live' when ready
+          NOTIONAL_PER:  "5000"         # dollars per position
+        shell: bash
+        run: |
+          python execute_orders.py \
+            --broker alpaca \
+            --data-dir stock_data_400 \
+            --picklist backtests/picklist_highrsi_trend.csv \
+            --week "${WEEK}" \
+            --topk "${{ env.TOPK }}" \
+            --side buy \
+            --notional "${NOTIONAL_PER}"
+
+      - name: Upload order log
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: orders-${{ steps.when.outputs.friday }}
+          path: backtests/orders_*.json
+
       - name: Cache dataset between runs
         uses: actions/cache@v4
         with:
