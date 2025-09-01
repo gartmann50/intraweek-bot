@@ -452,6 +452,52 @@ jobs:
           topk = int(os.getenv('TOPK','6'))
           top6 = week_df.head(topk)['symbol'].tolist()
           print('Top-6 (RSI enforced):', ','.join(top6))
+
+      - name: Debug — show latest-week candidates (sorted) + save CSV
+        shell: python
+        run: |
+          import sys, pandas as pd, numpy as np
+          p='backtests/picklist_highrsi_trend.csv'
+          try:
+              df=pd.read_csv(p)
+          except Exception as e:
+              sys.exit(f'Could not read {p}: {e}')
+          if df.empty: sys.exit('Picklist is empty.')
+
+          # detect week column
+          wk='week_start' if 'week_start' in df.columns else ('week' if 'week' in df.columns else None)
+          if not wk: sys.exit('No week column (week_start/week) in picklist.')
+          # coerce
+          if 'rank' in df.columns: df['rank']=pd.to_numeric(df['rank'], errors='coerce')
+          if 'score' in df.columns: df['score']=pd.to_numeric(df['score'], errors='coerce')
+
+          # latest week subset
+          w=pd.to_datetime(df[wk], errors='coerce').dt.date
+          latest=w.max()
+          wdf=df[w==latest].copy()
+          if wdf.empty: sys.exit('No rows for latest week.')
+
+          # sort by rules: rank asc if present else score desc; tie-break symbol asc
+          if 'rank' in wdf.columns and wdf['rank'].notna().any():
+              wdf=wdf.sort_values(['rank','symbol'], ascending=[True,True], kind='stable')
+          elif 'score' in wdf.columns and wdf['score'].notna().any():
+              wdf=wdf.sort_values(['score','symbol'], ascending=[False,True], kind='stable')
+
+          # sanity prints
+          print(f'Latest week: {latest} | rows={len(wdf)}')
+          cols=[c for c in ['symbol','rank','score','filters'] if c in wdf.columns]
+          print('Top-30 (symbol, rank, score):')
+          print(wdf[cols].head(30).to_string(index=False))
+
+          # show first letters (to detect accidental alphabetical picking)
+          first_letters=(wdf['symbol'].astype(str).str[0]).value_counts().sort_index()
+          print('\nFirst-letter distribution for latest week:')
+          print(first_letters.to_string())
+
+          # save a full debug CSV for download
+          out='backtests/latest_week_debug.csv'
+          wdf.to_csv(out, index=False)
+          print(f'\nSaved full latest-week table to {out}')
       
       - name: Derive WEEK from picklist (compact)
         shell: python
