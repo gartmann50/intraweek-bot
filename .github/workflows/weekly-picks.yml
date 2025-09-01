@@ -1,6 +1,13 @@
 name: Weekly Picks
 
 on:
+  # Auto: every Friday 20:15 UTC  ≈ 22:15 in Oslo during summer
+  # (in winter this fires at 21:15 Oslo; see note below)
+  schedule:
+    - cron: "15 20 * * 5"
+    - cron: "15 21 * * 5"
+
+  # Manual: keep your existing inputs
   workflow_dispatch:
     inputs:
       mode:
@@ -28,6 +35,12 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+
+    # Defaults for scheduled runs
+    env:
+      MODE:  ${{ github.event_name == 'schedule' && 'build_and_email' || inputs.mode }}
+      TOPK:  ${{ inputs.topk != '' && inputs.topk || '6' }}
+      UNTIL: ${{ inputs.until }}
 
     steps:
       - name: Checkout
@@ -398,7 +411,7 @@ jobs:
           python -c "import pandas as pd, pathlib, sys; p=pathlib.Path('backtests/picklist_highrsi_trend.csv'); print('exists:', p.exists(), 'size:', p.stat().st_size if p.exists() else 0); (not p.exists()) and sys.exit(1); df=pd.read_csv(p); print('rows:', len(df)); print(df.head(10).to_string(index=False)); sys.exit(0 if len(df) else 1)"
 
       - name: Preview Top-6 in logs + save file
-        if: ${{ inputs.mode == 'build' || inputs.mode == 'build_and_email' }}
+        if: ${{ env.MODE == 'build' || env.MODE == 'build_and_email' }}
         run: |
           python preview_top6.py \
             --picklist backtests/picklist_highrsi_trend.csv \
@@ -467,6 +480,7 @@ jobs:
 
 
       - name: Email weekly picks (poem + full names, BCC recipients)
+        if: ${{ env.MODE == 'build_and_email' || env.MODE == 'email_smoke' }}
         env:
           SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
