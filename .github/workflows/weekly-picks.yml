@@ -498,6 +498,14 @@ jobs:
           out='backtests/latest_week_debug.csv'
           wdf.to_csv(out, index=False)
           print(f'\nSaved full latest-week table to {out}')
+
+      - name: Upload latest-week debug CSV
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: latest-week-debug-${{ steps.when.outputs.friday }}
+          path: backtests/latest_week_debug.csv
+          retention-days: 7
       
       - name: Derive WEEK from picklist (compact)
         shell: python
