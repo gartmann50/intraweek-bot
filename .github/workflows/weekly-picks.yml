@@ -309,44 +309,82 @@ jobs:
           df = pd.read_csv(files[0]).head()
           print(df.to_string(index=False))
 
-      - name: Make equities-only universe from dataset (type=CS + cap floor)
+      - name: Make equities-only universe from dataset (CS + cap floor, safe)
         env:
-          POLY_KEY:  ${{ secrets.POLYGON_API_KEY }}
-          FRIDAY:    ${{ steps.when.outputs.friday }}
-          CAP_MIN:   "5000000000"  # $5B; bump to 10000000000 for $10B, etc.
+          POLY_KEY:   ${{ secrets.POLYGON_API_KEY }}
+          FRIDAY:     ${{ steps.when.outputs.friday }}
+          CAP_MIN:    "5000000000"   # $5B; change to 10000000000 for $10B, etc.
+          TOPN:       "342"          # keep about the ~342 you liked (set 400/500 if you prefer)
           EXCLUDE_SYMS: "SPLK,SGEN,SPY,QQQ,IWM,VOO,VTI,DIA,XLK"
         shell: python
         run: |
           import os, glob, csv, time, requests, pathlib
-          key=os.getenv('POLY_KEY'); friday=os.getenv('FRIDAY'); cap_min=float(os.getenv('CAP_MIN','0'))
-          if not key: raise SystemExit("Missing POLYGON_API_KEY secret")
-          # gather symbols from your dataset (handles TICKER.csv or TICKER_*.csv)
+
+          key    = os.getenv('POLY_KEY')
+          friday = os.getenv('FRIDAY')
+          capmin = float(os.getenv('CAP_MIN','0'))
+          topn   = int(os.getenv('TOPN','1000000'))
+          if not key:
+              raise SystemExit("Missing POLYGON_API_KEY secret")
+
+          # symbols from your dataset (handles TICKER.csv or TICKER_*.csv)
           files = glob.glob('stock_data_400/*.csv')
           syms  = sorted({ pathlib.Path(p).stem.split('_')[0].upper() for p in files })
-          # optional manual excludes
-          ban={s.strip().upper() for s in os.getenv('EXCLUDE_SYMS','').split(',') if s.strip()}
+
+          # ban list: defaults + universe/exclude.txt + env
+          ban = {s.strip().upper() for s in os.getenv('EXCLUDE_SYMS','').split(',') if s.strip()}
           try:
-              with open('universe/exclude.txt',encoding='utf-8') as f:
+              with open('universe/exclude.txt', encoding='utf-8') as f:
                   ban |= {l.strip().upper() for l in f if l.strip() and not l.strip().startswith('#')}
           except FileNotFoundError:
               pass
-          # polygon overview per symbol → type + market_cap on Friday
-          def ok(sym):
+
+          def overview_ok(sym):
+              """Return (ok, market_cap). ok=True only if type=CS and cap>=capmin."""
+              url = f'https://api.polygon.io/v3/reference/tickers/{sym}'
+              params = {'date': friday, 'apiKey': key}
               for k in range(5):
-                  r = requests.get(f'https://api.polygon.io/v3/reference/tickers/{sym}',
-                                   params={'date':friday,'apiKey':key}, timeout=20)
-                  if r.status_code != 429:
+                  try:
+                      r = requests.get(url, params=params, timeout=20)
+                      if r.status_code == 404:       # unknown/delisted on that date → skip
+                          return (False, 0.0)
+                      if r.status_code == 429:       # polite backoff
+                          time.sleep(0.5*(2**k)); continue
                       r.raise_for_status()
-                      j = (r.json() or {}).get('results',{}) or {}
-                      t = j.get('type'); mc = j.get('market_cap') or 0
-                      return (t == 'CS') and (float(mc) >= cap_min)
-                  time.sleep(0.5*(2**k))  # backoff
-              r.raise_for_status()
-          allowed = [s for s in syms if s not in ban and ok(s)]
-          out = pathlib.Path('universe/top_cs_cap.csv'); out.parent.mkdir(parents=True, exist_ok=True)
+                      j = (r.json() or {}).get('results', {}) or {}
+                      t = j.get('type')
+                      mc = float(j.get('market_cap') or 0.0)
+                      return ((t == 'CS') and (mc >= capmin), mc)
+                  except Exception:
+                      time.sleep(0.5*(2**k))
+              # on persistent error, just skip the symbol
+              return (False, 0.0)
+
+          kept = []
+          dropped = 0
+          for s in syms:
+              if s in ban:
+                  dropped += 1
+                  continue
+              ok, mc = overview_ok(s)
+              if ok:
+                  kept.append((s, mc))
+              else:
+                  dropped += 1
+
+          # sort by market cap desc, keep at most TOPN
+          kept.sort(key=lambda x: x[1], reverse=True)
+          if topn < len(kept):
+              kept = kept[:topn]
+
+          out = pathlib.Path('universe/top_cs_cap.csv')
+          out.parent.mkdir(parents=True, exist_ok=True)
           with out.open('w', newline='') as f:
-              w=csv.writer(f); w.writerow(['symbol']); w.writerows([[s] for s in allowed])
-          print(f'Universe saved → {out}  syms={len(allowed)} (cap_min={int(cap_min):,})')
+              w = csv.writer(f); w.writerow(['symbol'])
+              for s, _mc in kept:
+                  w.writerow([s])
+
+          print(f'Universe saved → {out}  syms={len(kept)}  (dropped={dropped}, cap_min={int(capmin):,}, topn={topn})')
 
       # --- BUILD PICKLIST ---
       - name: Build weekly picklist (RSI≥68, rank=rsi, ext20≤0.15, Top-40/wk)
