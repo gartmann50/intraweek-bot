@@ -96,23 +96,38 @@ jobs:
           print(f"::set-output name=monday::{next_mon.isoformat()}")
           PY
 
-      - name: Gate to U.S. market open (sleep to 09:30 NY) for scheduled Monday runs
+      - name: Gate to U.S. market open (sleep to 09:30 NY) on scheduled runs
         if: ${{ github.event_name == 'schedule' }}
         shell: python
         run: |
-          import os, sys, time
+          import time
           from datetime import datetime, timedelta, timezone
           try:
             import zoneinfo
           except ImportError:
-            from backports import zoneinfo  # not needed on 3.11
+            from backports import zoneinfo
           ny = zoneinfo.ZoneInfo("America/New_York")
           now_utc = datetime.now(timezone.utc)
           now_ny  = now_utc.astimezone(ny)
 
-          # Only apply the gate on Mondays
-          if now_ny.weekday() != 0:
-              print("Not Monday in New York; no open gate needed."); sys.exit(0)
+          open_ny   = now_ny.replace(hour=9, minute=30, second=0, microsecond=0)
+          target    = open_ny + timedelta(seconds=3)     # small buffer after the bell
+          too_early = open_ny - timedelta(minutes=5)     # don’t sleep if cron fired way earlier
+          too_late  = open_ny + timedelta(minutes=10)    # if we’re late, proceed
+
+          print(f"Now (NY): {now_ny.isoformat()}")
+          print(f"Open (NY): {open_ny.isoformat()}  Target: {target.isoformat()}")
+
+          if now_ny < too_early:
+              print("More than 5 minutes before the open; not gating in this run.")
+          elif now_ny < target:
+              secs = (target - now_ny).total_seconds()
+              print(f"Sleeping {secs:.1f}s to align with the open…")
+              time.sleep(secs)
+          elif now_ny <= too_late:
+              print("Within 10 minutes after the open; continuing immediately.")
+          else:
+              print("Well past the open; continuing.")
 
           open_ny = now_ny.replace(hour=9, minute=30, second=0, microsecond=0)
           target  = open_ny + timedelta(seconds=3)   # small buffer after the bell
