@@ -532,8 +532,19 @@ jobs:
           echo "== Tail of picklist =="
           tail -n 20 backtests/picklist_highrsi_trend.csv || true
 
-      - name: Upload artifacts (picklist + preview)
-        if: ${{ inputs.mode == 'build' || inputs.mode == 'build_and_email' }}
+      - name: Save Top-K preview to file
+        run: |
+          python - <<'PY'
+          import pandas as pd, sys
+          df = pd.read_csv('backtests/picklist_highrsi_trend.csv')
+          wk = "${{ steps.when.outputs.friday }}"
+          sub = df[pd.to_datetime(df.get('week_start', df.get('week')), errors='coerce').dt.date.astype(str)==wk]
+          cols = [c for c in ['symbol','rank','score','filters'] if c in sub.columns]
+          out = sub.sort_values(cols[:1]).head(int("${{ env.TOPK }}"))
+          out.to_string(open('backtests/top6_preview.txt','w'), index=False)
+          PY
+
+      - name: Upload picklist artifacts
         uses: actions/upload-artifact@v4
         with:
           name: weekly-picks-${{ steps.when.outputs.friday }}
