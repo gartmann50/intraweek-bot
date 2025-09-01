@@ -4,10 +4,15 @@ on:
   # Auto: every Friday 20:15 UTC  ≈ 22:15 in Oslo during summer
   # (in winter this fires at 21:15 Oslo; see note below)
   schedule:
+    # Fri after close (keep)
     - cron: "15 20 * * 5"
     - cron: "15 21 * * 5"
-    - cron: "28 13 * * 1"      # when U.S. is on EDT (open = 13:30 UTC)
-    - cron: "28 14 * * 1"      # when U.S. is on EST (open = 14:30 UTC)
+    # Mon–Thu after close (NEW: updates trailing stops nightly)
+    - cron: "15 20 * * 1-4"   # ~20:15 UTC during EDT
+    - cron: "15 21 * * 1-4"   # ~21:15 UTC during EST
+    # Monday open prep (keep)
+    - cron: "28 13 * * 1"     # EDT open
+    - cron: "28 14 * * 1"     # EST open
 
   # Manual: keep your existing inputs
   workflow_dispatch:
