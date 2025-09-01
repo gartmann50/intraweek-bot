@@ -440,7 +440,7 @@ jobs:
           wdf.to_csv(out, index=False)
           print(f'\nSaved full latest-week table to {out}')
 
-      - name: Compute trailing stops (ratcheting) and write report
+      - name: Compute trailing stops (ratcheting, ATR 14 × 1.75) and write report
         shell: bash
         run: |
           WEEK_VAL="${WEEK:-${{ steps.when.outputs.friday }}}"
@@ -453,8 +453,9 @@ jobs:
             --monday "$MON_VAL" \
             --topk "${{ env.TOPK }}" \
             --positions backtests/positions.json \
-            --method pct \
-            --trail-pct 0.10
+            --method atr \
+            --atr-win 14 \
+            --atr-mult 1.75
 
       - name: Upload trailing-stop artifacts
         uses: actions/upload-artifact@v4
