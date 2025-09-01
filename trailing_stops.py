@@ -209,11 +209,24 @@ def main():
     # save artifacts
     pos_path.parent.mkdir(parents=True, exist_ok=True)
     save_positions(pos_path, state)
-    pd.DataFrame(stops_rows).sort_values("symbol").to_csv("backtests/stops.csv", index=False)
-    pathlib.Path("backtests/trailing_report.txt").write_text("\n".join(report_lines), encoding="utf-8")
-    print("\n".join(report_lines))
-    print("Wrote backtests/positions.json, backtests/stops.csv, backtests/trailing_report.txt")
+
+    cols = ["symbol","entry_date","entry_price","peak_close","stop","last_close","active"]
+    stops_df = pd.DataFrame(stops_rows, columns=cols)
+    if not stops_df.empty:
+        stops_df = stops_df.sort_values("symbol")
+        msg = f"{len(stops_df)} active/closed rows"
+    else:
+        msg = "no rows (no picks or no data yet)"
+    stops_df.to_csv("backtests/stops.csv", index=False)
+
+    report = "\n".join(report_lines) if report_lines else "[trailing_stops] no symbols processed"
+    pathlib.Path("backtests/trailing_report.txt").write_text(report, encoding="utf-8")
+
+    print(report)
+    print(f"Wrote backtests/positions.json, backtests/stops.csv ({msg}), backtests/trailing_report.txt")
+
 
 if __name__ == "__main__":
     main()
+
 
