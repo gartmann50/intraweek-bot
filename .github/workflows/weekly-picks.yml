@@ -72,33 +72,31 @@ jobs:
         run: |
           echo "Triggered by: ${{ github.event_name }} at $(/bin/date -u '+%Y-%m-%d %H:%M:%S') UTC"
 
-      - name: Compute last Friday (Europe/Oslo)
+      - name: Compute last Friday (Europe/Oslo) + write runner_dates.json
         id: when
         run: |
           python - <<'PY'
           from datetime import datetime, timedelta
-          import zoneinfo, os, json
+          import zoneinfo, json, os
           tz = zoneinfo.ZoneInfo("Europe/Oslo")
           now = datetime.now(tz)
-          # If user supplied --until, use that, else compute last Friday
           override = "${{ inputs.until }}".strip()
           if override:
             fri = override
           else:
             d = now.date()
-            # step back to previous Friday (including today if Fri)
-            while d.weekday() != 4:
+            while d.weekday() != 4:  # 0=Mon,...,4=Fri
               d -= timedelta(days=1)
             fri = d.isoformat()
-          # next Monday after that Friday
-          f = datetime.fromisoformat(fri).date()
-          next_mon = f + timedelta(days=3)
-          print("FRI=", fri)
-          print("MON=", next_mon.isoformat())
-          with open("runner_dates.json","w") as fjson:
-            json.dump({"friday": fri, "next_monday": next_mon.isoformat()}, fjson)
-          print(f"::set-output name=friday::{fri}")
-          print(f"::set-output name=monday::{next_mon.isoformat()}")
+          fdate = datetime.fromisoformat(fri).date()
+          mon = (fdate + timedelta(days=3)).isoformat()  # nominal Monday (may be holiday)
+          with open('runner_dates.json','w') as f:
+            json.dump({"friday": fri, "nominal_monday": mon, "generated_at": now.isoformat()}, f, indent=2)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+            f.write(f"friday={fri}\n")
+            f.write(f"monday={mon}\n")
+          print("FRIDAY=", fri)
+          print("MONDAY=", mon)
           PY
 
       - name: Gate to U.S. open (Alpaca clock, max 2h sleep)
