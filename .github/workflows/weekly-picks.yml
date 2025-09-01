@@ -327,6 +327,81 @@ jobs:
             --until "${UNTIL}" \
             --out backtests/picklist_highrsi_trend.csv
 
+      - name: Filter to US Common Stock (type=CS) + cap floor, then re-rank (compact)
+        env:
+          POLY_KEY: ${{ secrets.POLYGON_API_KEY }}
+          FRIDAY:   ${{ steps.when.outputs.friday }}
+          CAP_MIN:  "10000000000"   # $10B; bump to 20000000000 for $20B if you like
+          EXCLUDE_SYMS: "ATLCL,SPLK,SGEN,SPY,QQQ,IWM,VOO,VTI,DIA,XLK"
+        shell: python
+        run: |
+          import os, time, requests, pandas as pd, sys
+          pick='backtests/picklist_highrsi_trend.csv'
+          try: df=pd.read_csv(pick)
+          except Exception as e: sys.exit(f'Could not read {pick}: {e}')
+          if df.empty: sys.exit('Picklist is empty.')
+          wk='week_start' if 'week_start' in df.columns else ('week' if 'week' in df.columns else None)
+          if not wk: sys.exit('No week column.')
+
+          key=os.getenv('POLY_KEY'); friday=os.getenv('FRIDAY'); cap_min=float(os.getenv('CAP_MIN','0'))
+          if not key: sys.exit('No POLYGON_API_KEY secret')
+
+          # ban list (defaults + repo file + env)
+          ban={s.strip().upper() for s in os.getenv('EXCLUDE_SYMS','').split(',') if s.strip()}
+          try:
+            with open('universe/exclude.txt',encoding='utf-8') as f:
+              ban |= {l.strip().upper() for l in f if l.strip() and not l.strip().startswith('#')}
+          except FileNotFoundError:
+            pass
+
+          # latest week subset
+          df['symbol']=df['symbol'].astype(str).str.upper()
+          d=pd.to_datetime(df[wk], errors='coerce').dt.date
+          latest=d.max()
+          cand=df[d==latest].copy()
+          uniq=list(cand['symbol'].dropna().unique())
+          # query Polygon overview only for candidates (fast)
+          def overview(sym):
+            u=f'https://api.polygon.io/v3/reference/tickers/{sym}'
+            for k in range(5):
+              r=requests.get(u, params={'date':friday,'apiKey':key}, timeout=20)
+              if r.status_code==404: return ('NA', 0.0)      # treat as not allowed
+              if r.status_code!=429:
+                r.raise_for_status()
+                j=(r.json() or {}).get('results',{}) or {}
+                return (j.get('type'), float(j.get('market_cap') or 0.0))
+              time.sleep(0.5*(2**k))
+            return ('ERR', 0.0)
+
+          keep=set(); dropped=[]
+          for s in uniq:
+            if s in ban: dropped.append((s,'BANNED',None)); continue
+            t, mc = overview(s)
+            if t=='CS' and mc>=cap_min: keep.add(s)
+            else: dropped.append((s,t,mc))
+
+          before=len(cand)
+          cand=cand[cand['symbol'].isin(keep)].copy()
+          removed=before-len(cand)
+
+          # enforce your RSI ordering and renumber ranks for the latest week
+          if 'rank' in cand.columns:
+            cand['rank']=pd.to_numeric(cand['rank'], errors='coerce')
+            cand=cand.sort_values(['rank','symbol'], ascending=[True,True], kind='stable')
+          elif 'score' in cand.columns:
+            cand['score']=pd.to_numeric(cand['score'], errors='coerce')
+            cand=cand.sort_values(['score','symbol'], ascending=[False,True], kind='stable')
+          cand['rank']=range(1, len(cand)+1)
+
+          # stitch back into the full file
+          out=pd.concat([df[d!=latest], cand], ignore_index=True)
+          out.to_csv(pick, index=False)
+
+          print(f'Kept {len(keep)} symbols with type=CS & market_cap >= {int(cap_min):,}. Removed {removed}.')
+          if dropped:
+            print('Dropped (sample):', dropped[:10])
+          print('Top-6 after filter:', ','.join(cand.head(6)['symbol'].astype(str)))
+
       - name: Force RSI order (latest week), clean symbols, and re-rank (compact)
         env:
           TOPK: ${{ inputs.topk != '' && inputs.topk || '6' }}
