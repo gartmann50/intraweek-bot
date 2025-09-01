@@ -91,6 +91,42 @@ jobs:
           print(f"::set-output name=monday::{next_mon.isoformat()}")
           PY
 
+      - name: Gate to U.S. market open (sleep to 09:30 NY) for scheduled Monday runs
+        if: ${{ github.event_name == 'schedule' }}
+        shell: python
+        run: |
+          import os, sys, time
+          from datetime import datetime, timedelta, timezone
+          try:
+            import zoneinfo
+          except ImportError:
+            from backports import zoneinfo  # not needed on 3.11
+          ny = zoneinfo.ZoneInfo("America/New_York")
+          now_utc = datetime.now(timezone.utc)
+          now_ny  = now_utc.astimezone(ny)
+
+          # Only apply the gate on Mondays
+          if now_ny.weekday() != 0:
+              print("Not Monday in New York; no open gate needed."); sys.exit(0)
+
+          open_ny = now_ny.replace(hour=9, minute=30, second=0, microsecond=0)
+          target  = open_ny + timedelta(seconds=3)   # small buffer after the bell
+          too_late = open_ny + timedelta(minutes=10) # safety window
+
+          print(f"Now (NY):   {now_ny.isoformat()}")
+          print(f"Open (NY):  {open_ny.isoformat()}")
+          print(f"Target (NY):{target.isoformat()}  (sleep until this if we're early)")
+
+          if now_ny < target:
+              secs = (target - now_ny).total_seconds()
+              print(f"Sleeping {secs:.1f}s to align with the open…")
+              time.sleep(secs)
+          elif now_ny > too_late:
+              print("We're more than 10 minutes past the open; exiting neutral (no-op).")
+              sys.exit(78)  # neutral exit
+          else:
+              print("We're within the post-open window; continuing immediately.")
+
       - name: Cache dataset between runs
         uses: actions/cache@v4
         with:
