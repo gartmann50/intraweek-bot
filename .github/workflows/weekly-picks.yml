@@ -397,82 +397,61 @@ jobs:
             --until "${{ steps.when.outputs.friday }}" \
             --out backtests/picklist_highrsi_trend.csv
 
-      - name: Enforce CS type + market-cap floor (compact) and re-rank
+      - name: Force RSI order (latest week), clean symbols, and re-rank (compact)
         env:
-          POLY_KEY:    ${{ secrets.POLYGON_API_KEY }}
-          FRIDAY:      ${{ steps.when.outputs.friday }}
-          CAP_MIN:     "5000000000"  # $5B floor; adjust to taste (e.g., 20000000000 for $20B)
-          EXCLUDE_SYMS: "SPLK,SGEN,SPY,QQQ,IWM,VOO,VTI,DIA,XLK"
+          TOPK: ${{ inputs.topk != '' && inputs.topk || '6' }}
         shell: python
         run: |
-          import os, sys, time, requests, pandas as pd
-          pick='backtests/picklist_highrsi_trend.csv'
+          import os, re, sys, pandas as pd
+          p='backtests/picklist_highrsi_trend.csv'
           try:
-              df=pd.read_csv(pick)
+              df=pd.read_csv(p)
           except Exception as e:
-              sys.exit(f'Could not read {pick}: {e}')
-          if df.empty: sys.exit('Picklist is empty after build.')
+              sys.exit(f'Could not read {p}: {e}')
+          if df.empty:
+              sys.exit('Picklist is empty.')
 
-          # Build ban list: defaults + repo file + env
-          ban={s.strip().upper() for s in os.getenv('EXCLUDE_SYMS','').split(',') if s.strip()}
-          try:
-              with open('universe/exclude.txt',encoding='utf-8') as f:
-                  ban |= {l.strip().upper() for l in f if l.strip() and not l.strip().startswith('#')}
-          except FileNotFoundError:
-              pass
+          # choose week column
+          wk='week_start' if 'week_start' in df.columns else ('week' if 'week' in df.columns else None)
+          if not wk:
+              sys.exit('No week column (week_start/week) in picklist.')
 
-          key=os.getenv('POLY_KEY'); friday=os.getenv('FRIDAY'); cap_min=float(os.getenv('CAP_MIN','0'))
-          if not key: sys.exit('No POLYGON_API_KEY secret available')
+          # keep normal equity-like tickers (gets rid of baby-bonds/notes like ATLCL etc.)
+          df['symbol']=df['symbol'].astype(str).str.upper()
+          df=df[df['symbol'].str.fullmatch(r'[A-Z]{1,5}')].copy()
 
-          # Query Polygon Ticker Overview (per symbol) to get type + market_cap
-          def tinfo(sym):
-              u=f'https://api.polygon.io/v3/reference/tickers/{sym}'
-              for k in range(5):
-                  r=requests.get(u, params={'date': friday, 'apiKey': key}, timeout=20)
-                  if r.status_code!=429:
-                      r.raise_for_status()
-                      j=r.json().get('results',{}) or {}
-                      return (j.get('type'), j.get('market_cap'))
-                  time.sleep(0.5*(2**k))  # backoff
-              r.raise_for_status()
-
-          df['__UP']=df['symbol'].str.upper()
-          uniq=list(df['__UP'].dropna().unique())
-          keep=set()
-          dropped_meta=[]
-
-          for s in uniq:
-              try:
-                  t, mc = tinfo(s)
-                  if (t=='CS') and (mc is not None) and (float(mc) >= cap_min) and (s not in ban):
-                      keep.add(s)
-                  else:
-                      dropped_meta.append((s, t, mc))
-              except Exception as e:
-                  dropped_meta.append((s, 'ERR', None))
-
-          before=len(df)
-          df=df[df['__UP'].isin(keep)].drop(columns='__UP')
-          removed=before-len(df)
-
-          wkcol='week_start' if 'week_start' in df.columns else ('week' if 'week' in df.columns else None)
-          if not wkcol: sys.exit('Picklist missing week column')
-
-          # Preserve RSI ordering; re-number ranks per week
+          # numeric rank/score
           if 'rank' in df.columns:
-              df['__r']=pd.to_numeric(df['rank'],errors='coerce')
-              df=df.sort_values([wkcol,'__r','symbol'],ascending=[True,True,True],kind='stable').drop(columns='__r')
-              df['rank']=df.groupby(wkcol).cumcount()+1
-          elif 'score' in df.columns:
-              df['__s']=pd.to_numeric(df['score'],errors='coerce')
-              df=df.sort_values([wkcol,'__s','symbol'],ascending=[True,False,True],kind='stable').drop(columns='__s')
+              df['rank']=pd.to_numeric(df['rank'], errors='coerce')
+          if 'score' in df.columns:
+              df['score']=pd.to_numeric(df['score'], errors='coerce')
 
-          df.to_csv(pick,index=False)
-          print(f'Kept {len(keep)} symbols with type=CS and market_cap >= {int(cap_min):,}. Removed {removed}.')
-          if dropped_meta:
-              print('Dropped (symbol,type,market_cap sample):', dropped_meta[:8])
-          sub=df[df[wkcol]==str(df[wkcol].max())].head(6)
-          print('Top-6 after CS+cap enforcement:', ','.join(sub['symbol'].astype(str)))
+          # latest week
+          w = pd.to_datetime(df[wk], errors='coerce').dt.date
+          if w.isna().all():
+              sys.exit('No parsable dates in week column.')
+          latest = w.max()
+
+          week_df = df[w == latest].copy()
+          if week_df.empty:
+              sys.exit('No rows for the latest week.')
+
+          # enforce RSI ordering: rank asc if present, else score desc
+          if 'rank' in week_df.columns and week_df['rank'].notna().any():
+              week_df = week_df.sort_values(['rank','symbol'], ascending=[True,True], kind='stable')
+          elif 'score' in week_df.columns and week_df['score'].notna().any():
+              week_df = week_df.sort_values(['score','symbol'], ascending=[False,True], kind='stable')
+
+          # re-number ranks 1..N for the latest week (leave other weeks untouched)
+          week_df['rank'] = range(1, len(week_df)+1)
+
+          # stitch back: drop old latest-week rows, append the ordered/re-ranked ones
+          df_out = pd.concat([df[w != latest], week_df], ignore_index=True)
+          df_out.to_csv(p, index=False)
+
+          topk = int(os.getenv('TOPK','6'))
+          top6 = week_df.head(topk)['symbol'].tolist()
+          print('Top-6 (RSI enforced):', ','.join(top6))
       
       - name: Derive WEEK from picklist (compact)
         shell: python
