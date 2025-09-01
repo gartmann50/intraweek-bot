@@ -320,80 +320,82 @@ jobs:
             --until "${{ steps.when.outputs.friday }}" \
             --out backtests/picklist_highrsi_trend.csv
 
-      - name: Enforce Top-N US common stocks (market cap) + re-rank (compact)
+      - name: Enforce CS type + market-cap floor (compact) and re-rank
         env:
-          POLY_KEY: ${{ secrets.POLYGON_API_KEY }}
-          FRIDAY:   ${{ steps.when.outputs.friday }}
-          TOPN:     "400"  # change to 500 if you prefer
+          POLY_KEY:    ${{ secrets.POLYGON_API_KEY }}
+          FRIDAY:      ${{ steps.when.outputs.friday }}
+          CAP_MIN:     "5000000000"  # $5B floor; adjust to taste (e.g., 20000000000 for $20B)
           EXCLUDE_SYMS: "SPLK,SGEN,SPY,QQQ,IWM,VOO,VTI,DIA,XLK"
         shell: python
         run: |
-          import os, sys, pandas as pd, requests
-
-          pick = 'backtests/picklist_highrsi_trend.csv'
+          import os, sys, time, requests, pandas as pd
+          pick='backtests/picklist_highrsi_trend.csv'
           try:
-              df = pd.read_csv(pick)
+              df=pd.read_csv(pick)
           except Exception as e:
               sys.exit(f'Could not read {pick}: {e}')
-          if 'symbol' not in df.columns:
-              sys.exit('Picklist missing symbol column')
+          if df.empty: sys.exit('Picklist is empty after build.')
 
-          # Build ban list (defaults + repo file + env)
-          ban = {s.strip().upper() for s in os.getenv('EXCLUDE_SYMS','').split(',') if s.strip()}
+          # Build ban list: defaults + repo file + env
+          ban={s.strip().upper() for s in os.getenv('EXCLUDE_SYMS','').split(',') if s.strip()}
           try:
-              with open('universe/exclude.txt', encoding='utf-8') as f:
+              with open('universe/exclude.txt',encoding='utf-8') as f:
                   ban |= {l.strip().upper() for l in f if l.strip() and not l.strip().startswith('#')}
           except FileNotFoundError:
               pass
 
-          key    = os.getenv('POLY_KEY')
-          friday = os.getenv('FRIDAY')
-          topn   = int(os.getenv('TOPN','400'))
+          key=os.getenv('POLY_KEY'); friday=os.getenv('FRIDAY'); cap_min=float(os.getenv('CAP_MIN','0'))
+          if not key: sys.exit('No POLYGON_API_KEY secret available')
 
-          allowed = None
-          if key:
-              # Fetch Top-N US Common Stocks (active on Friday), sorted by market_cap desc
-              url = 'https://api.polygon.io/v3/reference/tickers'
-              params = {
-                  'market':'stocks','type':'CS','active':'true','locale':'us',
-                  'date':friday,'limit':1000,'sort':'market_cap','order':'desc','apiKey':key
-              }
-              r = requests.get(url, params=params, timeout=30)
+          # Query Polygon Ticker Overview (per symbol) to get type + market_cap
+          def tinfo(sym):
+              u=f'https://api.polygon.io/v3/reference/tickers/{sym}'
+              for k in range(5):
+                  r=requests.get(u, params={'date': friday, 'apiKey': key}, timeout=20)
+                  if r.status_code!=429:
+                      r.raise_for_status()
+                      j=r.json().get('results',{}) or {}
+                      return (j.get('type'), j.get('market_cap'))
+                  time.sleep(0.5*(2**k))  # backoff
+              r.raise_for_status()
+
+          df['__UP']=df['symbol'].str.upper()
+          uniq=list(df['__UP'].dropna().unique())
+          keep=set()
+          dropped_meta=[]
+
+          for s in uniq:
               try:
-                  r.raise_for_status()
-                  results = r.json().get('results', [])
-                  allowed = {x.get('ticker','').upper() for x in results[:topn]}
+                  t, mc = tinfo(s)
+                  if (t=='CS') and (mc is not None) and (float(mc) >= cap_min) and (s not in ban):
+                      keep.add(s)
+                  else:
+                      dropped_meta.append((s, t, mc))
               except Exception as e:
-                  print(f'WARN: Polygon allowlist fetch failed ({e}); falling back to local filters.')
+                  dropped_meta.append((s, 'ERR', None))
 
-          df['__UP'] = df['symbol'].str.upper()
-          before = len(df)
-          # If we got an allowlist, intersect; always remove banned
-          if allowed:
-              df = df[df['__UP'].isin(allowed) & ~df['__UP'].isin(ban)]
-          else:
-              df = df[~df['__UP'].isin(ban)]
-          df = df.drop(columns='__UP')
-          removed = before - len(df)
+          before=len(df)
+          df=df[df['__UP'].isin(keep)].drop(columns='__UP')
+          removed=before-len(df)
 
-          wkcol = 'week_start' if 'week_start' in df.columns else ('week' if 'week' in df.columns else None)
-          if not wkcol:
-              sys.exit('Picklist missing week column')
+          wkcol='week_start' if 'week_start' in df.columns else ('week' if 'week' in df.columns else None)
+          if not wkcol: sys.exit('Picklist missing week column')
 
-          # Preserve your RSI ordering and re-number ranks per week
+          # Preserve RSI ordering; re-number ranks per week
           if 'rank' in df.columns:
-              df['__r'] = pd.to_numeric(df['rank'], errors='coerce')
-              df = df.sort_values([wkcol,'__r','symbol'], ascending=[True,True,True], kind='stable').drop(columns='__r')
-              df['rank'] = df.groupby(wkcol).cumcount() + 1
+              df['__r']=pd.to_numeric(df['rank'],errors='coerce')
+              df=df.sort_values([wkcol,'__r','symbol'],ascending=[True,True,True],kind='stable').drop(columns='__r')
+              df['rank']=df.groupby(wkcol).cumcount()+1
           elif 'score' in df.columns:
-              df['__s'] = pd.to_numeric(df['score'], errors='coerce')
-              df = df.sort_values([wkcol,'__s','symbol'], ascending=[True,False,True], kind='stable').drop(columns='__s')
+              df['__s']=pd.to_numeric(df['score'],errors='coerce')
+              df=df.sort_values([wkcol,'__s','symbol'],ascending=[True,False,True],kind='stable').drop(columns='__s')
 
-          df.to_csv(pick, index=False)
-          print(f'Enforced Top-{topn} US CS + excludes. Removed {removed}; kept {len(df)}.')
-          sub = df[df[wkcol]==str(df[wkcol].max())].head(6)
-          print('Top-6 after enforcement:', ','.join(sub['symbol'].astype(str)))
-
+          df.to_csv(pick,index=False)
+          print(f'Kept {len(keep)} symbols with type=CS and market_cap >= {int(cap_min):,}. Removed {removed}.')
+          if dropped_meta:
+              print('Dropped (symbol,type,market_cap sample):', dropped_meta[:8])
+          sub=df[df[wkcol]==str(df[wkcol].max())].head(6)
+          print('Top-6 after CS+cap enforcement:', ','.join(sub['symbol'].astype(str)))
       
       - name: Derive WEEK from picklist (compact)
         shell: python
