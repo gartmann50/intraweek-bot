@@ -321,11 +321,9 @@ jobs:
         run: |
           python build_picklist_parametric.py \
             --data-dir stock_data_400 \
-            --universe-file universe/top400_weekly.csv \
             --rsi-min 68 \
             --max-ext20 0.15 \
             --top-per-week 40 \
-            --rank rsi \
             --until "${UNTIL}" \
             --out backtests/picklist_highrsi_trend.csv
 
