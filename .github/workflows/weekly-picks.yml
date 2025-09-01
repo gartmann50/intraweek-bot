@@ -320,60 +320,79 @@ jobs:
             --until "${{ steps.when.outputs.friday }}" \
             --out backtests/picklist_highrsi_trend.csv
 
-      - name: Enforce equities-only via Polygon (CS, active) + re-rank (compact)
+      - name: Enforce Top-N US common stocks (market cap) + re-rank (compact)
         env:
           POLY_KEY: ${{ secrets.POLYGON_API_KEY }}
           FRIDAY:   ${{ steps.when.outputs.friday }}
+          TOPN:     "400"  # change to 500 if you prefer
           EXCLUDE_SYMS: "SPLK,SGEN,SPY,QQQ,IWM,VOO,VTI,DIA,XLK"
         shell: python
         run: |
           import os, sys, pandas as pd, requests
-          pick='backtests/picklist_highrsi_trend.csv'
+
+          pick = 'backtests/picklist_highrsi_trend.csv'
           try:
-              df=pd.read_csv(pick)
+              df = pd.read_csv(pick)
           except Exception as e:
               sys.exit(f'Could not read {pick}: {e}')
-          key=os.getenv('POLY_KEY'); friday=os.getenv('FRIDAY')
-          if not key:
-              sys.exit('No POLYGON_API_KEY secret available')
-          # fetch allowed = US Common Stock (CS), active on Friday
-          url='https://api.polygon.io/v3/reference/tickers'
-          params={'market':'stocks','type':'CS','active':'true','locale':'us','date':friday,'limit':1000,'apiKey':key}
-          allowed=set()
-          while True:
-              r=requests.get(url, params=params, timeout=30); r.raise_for_status()
-              j=r.json(); allowed.update(x.get('ticker','') for x in j.get('results',[]))
-              nxt=j.get('next_url')
-              if not nxt: break
-              # follow next_url (append apiKey if missing)
-              url=nxt + ('&' if '?' in nxt else '?') + f'apiKey={key}'
-              params={}
-          # defaults + file exclude
-          ban={s.strip().upper() for s in os.getenv('EXCLUDE_SYMS','').split(',') if s.strip()}
+          if 'symbol' not in df.columns:
+              sys.exit('Picklist missing symbol column')
+
+          # Build ban list (defaults + repo file + env)
+          ban = {s.strip().upper() for s in os.getenv('EXCLUDE_SYMS','').split(',') if s.strip()}
           try:
-              with open('universe/exclude.txt',encoding='utf-8') as f:
+              with open('universe/exclude.txt', encoding='utf-8') as f:
                   ban |= {l.strip().upper() for l in f if l.strip() and not l.strip().startswith('#')}
           except FileNotFoundError:
               pass
-          if 'symbol' not in df.columns: sys.exit('Picklist missing symbol column')
-          df['__UP']=df['symbol'].str.upper()
-          before=len(df)
-          df=df[df['__UP'].isin(allowed) & ~df['__UP'].isin(ban)].drop(columns='__UP')
-          removed=before-len(df)
-          wkcol='week_start' if 'week_start' in df.columns else ('week' if 'week' in df.columns else None)
-          if not wkcol: sys.exit('Picklist missing week column')
-          # keep RSI order, re-rank per week
+
+          key    = os.getenv('POLY_KEY')
+          friday = os.getenv('FRIDAY')
+          topn   = int(os.getenv('TOPN','400'))
+
+          allowed = None
+          if key:
+              # Fetch Top-N US Common Stocks (active on Friday), sorted by market_cap desc
+              url = 'https://api.polygon.io/v3/reference/tickers'
+              params = {
+                  'market':'stocks','type':'CS','active':'true','locale':'us',
+                  'date':friday,'limit':1000,'sort':'market_cap','order':'desc','apiKey':key
+              }
+              r = requests.get(url, params=params, timeout=30)
+              try:
+                  r.raise_for_status()
+                  results = r.json().get('results', [])
+                  allowed = {x.get('ticker','').upper() for x in results[:topn]}
+              except Exception as e:
+                  print(f'WARN: Polygon allowlist fetch failed ({e}); falling back to local filters.')
+
+          df['__UP'] = df['symbol'].str.upper()
+          before = len(df)
+          # If we got an allowlist, intersect; always remove banned
+          if allowed:
+              df = df[df['__UP'].isin(allowed) & ~df['__UP'].isin(ban)]
+          else:
+              df = df[~df['__UP'].isin(ban)]
+          df = df.drop(columns='__UP')
+          removed = before - len(df)
+
+          wkcol = 'week_start' if 'week_start' in df.columns else ('week' if 'week' in df.columns else None)
+          if not wkcol:
+              sys.exit('Picklist missing week column')
+
+          # Preserve your RSI ordering and re-number ranks per week
           if 'rank' in df.columns:
-              df['__r']=pd.to_numeric(df['rank'],errors='coerce')
-              df=df.sort_values([wkcol,'__r','symbol'],ascending=[True,True,True],kind='stable').drop(columns='__r')
-              df['rank']=df.groupby(wkcol).cumcount()+1
+              df['__r'] = pd.to_numeric(df['rank'], errors='coerce')
+              df = df.sort_values([wkcol,'__r','symbol'], ascending=[True,True,True], kind='stable').drop(columns='__r')
+              df['rank'] = df.groupby(wkcol).cumcount() + 1
           elif 'score' in df.columns:
-              df['__s']=pd.to_numeric(df['score'],errors='coerce')
-              df=df.sort_values([wkcol,'__s','symbol'],ascending=[True,False,True],kind='stable').drop(columns='__s')
-          df.to_csv(pick,index=False)
-          print(f'Equities-only enforced. Removed {removed} rows; kept {len(df)}.')
-          sub=df[df[wkcol]==str(df[wkcol].max())].head(6)
-          print('Top-6 after equities-only:', ','.join(sub['symbol'].astype(str)))
+              df['__s'] = pd.to_numeric(df['score'], errors='coerce')
+              df = df.sort_values([wkcol,'__s','symbol'], ascending=[True,False,True], kind='stable').drop(columns='__s')
+
+          df.to_csv(pick, index=False)
+          print(f'Enforced Top-{topn} US CS + excludes. Removed {removed}; kept {len(df)}.')
+          sub = df[df[wkcol]==str(df[wkcol].max())].head(6)
+          print('Top-6 after enforcement:', ','.join(sub['symbol'].astype(str)))
 
       
       - name: Derive WEEK from picklist (compact)
