@@ -109,13 +109,29 @@ def main():
         print("ERROR: picklist missing week column", file=sys.stderr); sys.exit(2)
 
     pick[wkcol] = pd.to_datetime(pick[wkcol], errors="coerce").dt.date
-    week = datetime.fromisoformat(args.week).date()
-    picks_week = pick[pick[wkcol] == week].copy()
-    if "rank" in picks_week.columns:
-        picks_week = picks_week.sort_values(["rank","symbol"], ascending=[True, True])
-    elif "score" in picks_week.columns:
-        picks_week = picks_week.sort_values(["score","symbol"], ascending=[False,True])
-    picks = [s.upper() for s in picks_week["symbol"].astype(str).head(args.topk).tolist()]
+
+    # If --week missing/blank, use latest week found in the picklist
+    if not (getattr(args, "week", "") or "").strip():
+        latest = pick[wkcol].dropna().max()
+        if pd.isna(latest):
+            print("ERROR: no parsable dates in picklist", file=sys.stderr); sys.exit(2)
+        args.week = latest.isoformat()
+        print(f"[trailing_stops] --week not supplied; using latest: {args.week}")
+
+    try:
+        week = datetime.fromisoformat(args.week).date()
+    except Exception:
+        print(f"ERROR: bad --week '{args.week}'", file=sys.stderr); sys.exit(2)
+
+    sub = pick[pick[wkcol] == week].copy()
+    if "rank" in sub.columns:
+        sub["rank"] = pd.to_numeric(sub["rank"], errors="coerce")
+        sub = sub.sort_values(["rank", "symbol"], ascending=[True, True])
+    elif "score" in sub.columns:
+        sub["score"] = pd.to_numeric(sub["score"], errors="coerce")
+        sub = sub.sort_values(["score", "symbol"], ascending=[False, True])
+
+    picks = [str(s).upper() for s in sub["symbol"].head(args.topk)]
 
     # load/prepare positions state
     state = load_positions(pos_path)
@@ -200,3 +216,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
