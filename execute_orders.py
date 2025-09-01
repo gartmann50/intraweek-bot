@@ -1,0 +1,134 @@
+#!/usr/bin/env python3
+"""
+execute_orders.py — place Monday-open buys for Top-K picks (or sells), using Alpaca REST.
+- Default: buy Top-K with equal *notional* (or share qty if notional unsupported).
+- Designed to be called right after your "gate to open" step.
+- Saves an orders log artifact at backtests/orders_<YYYYMMDD>.json
+"""
+import argparse, json, math, os, pathlib, sys
+from datetime import datetime, timezone
+import pandas as pd
+import requests
+
+def last_close_from_csv(data_dir: pathlib.Path, sym: str) -> float:
+    p = data_dir / f"{sym}.csv"
+    if not p.exists():
+        raise FileNotFoundError(f"missing csv {p}")
+    df = pd.read_csv(p, usecols=[0,4])  # Date, Close
+    if df.empty:
+        raise ValueError(f"empty csv {p}")
+    return float(df.iloc[-1, 1])
+
+def topk_from_picklist(picklist: pathlib.Path, week: str, topk: int) -> list[str]:
+    df = pd.read_csv(picklist)
+    wk = "week_start" if "week_start" in df.columns else ("week" if "week" in df.columns else None)
+    if not wk:
+        raise SystemExit("picklist missing week column")
+    df[wk] = pd.to_datetime(df[wk], errors="coerce").dt.date
+    w = datetime.fromisoformat(week).date()
+    sub = df[df[wk] == w].copy()
+    if "rank" in sub.columns:
+        sub["rank"] = pd.to_numeric(sub["rank"], errors="coerce")
+        sub = sub.sort_values(["rank","symbol"], ascending=[True,True])
+    elif "score" in sub.columns:
+        sub["score"] = pd.to_numeric(sub["score"], errors="coerce")
+        sub = sub.sort_values(["score","symbol"], ascending=[False,True])
+    return [s.upper() for s in sub["symbol"].astype(str).head(topk).tolist()]
+
+def alpaca_base(env: str) -> str:
+    return "https://paper-api.alpaca.markets" if env.lower().startswith("paper") else "https://api.alpaca.markets"
+
+def place_alpaca_order(base: str, key: str, secret: str, payload: dict) -> dict:
+    h = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret, "Content-Type": "application/json"}
+    r = requests.post(f"{base}/v2/orders", headers=h, data=json.dumps(payload), timeout=20)
+    # Don’t explode on 4xx — record it
+    try:
+        j = r.json()
+    except Exception:
+        j = {"error": f"Non-JSON response status {r.status_code}"}
+    if r.status_code >= 300:
+        j.setdefault("error", f"HTTP {r.status_code}")
+    return j
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--broker", choices=["alpaca"], default="alpaca")
+    ap.add_argument("--data-dir", required=True)
+    ap.add_argument("--picklist", required=True)
+    ap.add_argument("--week", required=True)
+    ap.add_argument("--topk", type=int, default=6)
+    ap.add_argument("--side", choices=["buy","sell"], required=True)
+    ap.add_argument("--notional", type=float, default=5000.0, help="USD per trade (fallback to qty if notional not allowed)")
+    ap.add_argument("--qty", type=int, default=0, help="override share qty (if >0, ignores notional)")
+    # Alpaca creds come from env
+    args = ap.parse_args()
+
+    # inputs
+    data_dir = pathlib.Path(args.data_dir)
+    picks = topk_from_picklist(pathlib.Path(args.picklist), args.week, args.topk)
+
+    # creds
+    alp_key = os.getenv("ALPACA_KEY","")
+    alp_secret = os.getenv("ALPACA_SECRET","")
+    alp_env = os.getenv("ALPACA_ENV","paper")
+    if not alp_key or not alp_secret:
+        print("Missing ALPACA_KEY/ALPACA_SECRET env.", file=sys.stderr)
+        sys.exit(1)
+    base = alpaca_base(alp_env)
+
+    # choose order params
+    # We are called *after* the gate, so we’re at ~09:30:03 NY time → send MARKET DAY
+    time_in_force = "day"
+    order_type = "market"
+
+    # build orders
+    orders = []
+    for sym in picks:
+        body = {
+            "symbol": sym,
+            "side": args.side,
+            "type": order_type,
+            "time_in_force": time_in_force,
+        }
+        if args.qty > 0:
+            body["qty"] = str(args.qty)
+        else:
+            # prefer notional (fractional) if supported; else compute integer qty from last close
+            try:
+                last_close = last_close_from_csv(data_dir, sym)
+                qty = max(1, int(args.notional // last_close))
+                body["notional"] = str(int(args.notional))
+                # If notional is rejected, we’ll retry with qty below.
+                body["_qty_fallback"] = str(qty)
+            except Exception:
+                body["qty"] = "1"
+        orders.append(body)
+
+    results = []
+    for body in orders:
+        j = place_alpaca_order(base, alp_key, alp_secret, {k:v for k,v in body.items() if not k.startswith("_")})
+        # Fallback if notional isn’t allowed
+        if "error" in j and "notional" in json.dumps(j).lower() and "_qty_fallback" in body:
+            qbody = {k:v for k,v in body.items() if not k.startswith("_")}
+            qbody.pop("notional", None)
+            qbody["qty"] = body["_qty_fallback"]
+            j2 = place_alpaca_order(base, alp_key, alp_secret, qbody)
+            j = {"first_attempt": j, "retry_qty": j2}
+        results.append({"symbol": body["symbol"], "request": body, "response": j})
+
+    # log file
+    outdir = pathlib.Path("backtests"); outdir.mkdir(exist_ok=True, parents=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+    out = outdir / f"orders_{stamp}.json"
+    out.write_text(json.dumps({"week": args.week, "side": args.side, "orders": results}, indent=2), encoding="utf-8")
+    print(f"Wrote {out} with {len(results)} orders.")
+    # pretty print a summary
+    for row in results:
+        sym = row["symbol"]
+        resp = row["response"]
+        oid = resp.get("id") or resp.get("retry_qty",{}).get("id") or resp.get("error")
+        status = resp.get("status") or resp.get("retry_qty",{}).get("status") or "error"
+        print(f"{sym}: order_id={oid} status={status}")
+
+if __name__ == "__main__":
+    main()
