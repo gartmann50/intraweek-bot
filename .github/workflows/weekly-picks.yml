@@ -131,7 +131,8 @@ jobs:
             --week "$WEEK_VAL" \
             --topk "${{ env.TOPK }}" \
             --side buy \
-            --notional "${NOTIONAL_PER}"
+            --notional "${NOTIONAL_PER}" \
+            --init-stop-atr-mult 1.75
 
       - name: Upload order log
         if: ${{ always() }}
