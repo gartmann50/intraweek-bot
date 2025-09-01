@@ -4,7 +4,7 @@ on:
   # Auto: every Friday 20:15 UTC  ≈ 22:15 in Oslo during summer
   # (in winter this fires at 21:15 Oslo; see note below)
   schedule:
-    - cron: "15 20 * * 5"
+    - cron: "*/5 * * * *"
     - cron: "15 21 * * 5"
 
   # Manual: keep your existing inputs
