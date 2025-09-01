@@ -96,56 +96,23 @@ jobs:
           print(f"::set-output name=monday::{next_mon.isoformat()}")
           PY
 
-      - name: Gate to U.S. market open (sleep to 09:30 NY) on scheduled runs
+      - name: Gate to U.S. open (Alpaca clock, compact)
         if: ${{ github.event_name == 'schedule' }}
+        env:
+          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          ALPACA_ENV:    paper
         shell: python
         run: |
-          import time
-          from datetime import datetime, timedelta, timezone
-          try:
-            import zoneinfo
-          except ImportError:
-            from backports import zoneinfo
-          ny = zoneinfo.ZoneInfo("America/New_York")
-          now_utc = datetime.now(timezone.utc)
-          now_ny  = now_utc.astimezone(ny)
-
-          open_ny   = now_ny.replace(hour=9, minute=30, second=0, microsecond=0)
-          target    = open_ny + timedelta(seconds=3)     # small buffer after the bell
-          too_early = open_ny - timedelta(minutes=5)     # don’t sleep if cron fired way earlier
-          too_late  = open_ny + timedelta(minutes=10)    # if we’re late, proceed
-
-          print(f"Now (NY): {now_ny.isoformat()}")
-          print(f"Open (NY): {open_ny.isoformat()}  Target: {target.isoformat()}")
-
-          if now_ny < too_early:
-              print("More than 5 minutes before the open; not gating in this run.")
-          elif now_ny < target:
-              secs = (target - now_ny).total_seconds()
-              print(f"Sleeping {secs:.1f}s to align with the open…")
-              time.sleep(secs)
-          elif now_ny <= too_late:
-              print("Within 10 minutes after the open; continuing immediately.")
-          else:
-              print("Well past the open; continuing.")
-
-          open_ny = now_ny.replace(hour=9, minute=30, second=0, microsecond=0)
-          target  = open_ny + timedelta(seconds=3)   # small buffer after the bell
-          too_late = open_ny + timedelta(minutes=10) # safety window
-
-          print(f"Now (NY):   {now_ny.isoformat()}")
-          print(f"Open (NY):  {open_ny.isoformat()}")
-          print(f"Target (NY):{target.isoformat()}  (sleep until this if we're early)")
-
-          if now_ny < target:
-              secs = (target - now_ny).total_seconds()
-              print(f"Sleeping {secs:.1f}s to align with the open…")
-              time.sleep(secs)
-          elif now_ny > too_late:
-              print("We're more than 10 minutes past the open; exiting neutral (no-op).")
-              sys.exit(78)  # neutral exit
-          else:
-              print("We're within the post-open window; continuing immediately.")
+            import os,time,requests,datetime as dt
+            base = "https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
+            h = {"APCA-API-KEY-ID": os.environ["ALPACA_KEY"], "APCA-API-SECRET-KEY": os.environ["ALPACA_SECRET"]}
+            c = requests.get(f"{base}/v2/clock", headers=h, timeout=20).json()
+            print("is_open:", c.get("is_open"), "next_open:", c.get("next_open"))
+            if not c.get("is_open"):
+              t = dt.datetime.fromisoformat(c["next_open"].replace("Z","+00:00"))
+              s = max(0, (t - dt.datetime.now(dt.timezone.utc)).total_seconds() + 3)
+             print(f"sleep {s:.1f}s → bell"); time.sleep(s)
 
       - name: Execute open buys (Alpaca)
         if: ${{ github.event_name == 'schedule' }}
