@@ -101,26 +101,52 @@ jobs:
           print(f"::set-output name=monday::{next_mon.isoformat()}")
           PY
 
-      - name: Gate to U.S. open (Alpaca clock, compact)
-        if: ${{ github.event_name == 'schedule' }}
+      - name: Gate to U.S. open (Alpaca clock, max 2h sleep)
+        if: ${{ github.event_name == 'schedule' && (github.event.schedule == '28 13 * * 1-5' || github.event.schedule == '28 14 * * 1-5') }}
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
           ALPACA_ENV:    paper
         shell: python
         run: |
-            import os,time,requests,datetime as dt
-            base = "https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
-            h = {"APCA-API-KEY-ID": os.environ["ALPACA_KEY"], "APCA-API-SECRET-KEY": os.environ["ALPACA_SECRET"]}
-            c = requests.get(f"{base}/v2/clock", headers=h, timeout=20).json()
-            print("is_open:", c.get("is_open"), "next_open:", c.get("next_open"))
-            if not c.get("is_open"):
-              t = dt.datetime.fromisoformat(c["next_open"].replace("Z","+00:00"))
-              s = max(0, (t - dt.datetime.now(dt.timezone.utc)).total_seconds() + 3)
-             print(f"sleep {s:.1f}s → bell"); time.sleep(s)
+         import os,time,sys,requests,datetime as dt
+         base = "https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
+         h = {"APCA-API-KEY-ID": os.environ["ALPACA_KEY"], "APCA-API-SECRET-KEY": os.environ["ALPACA_SECRET"]}
+         c = requests.get(f"{base}/v2/clock", headers=h, timeout=20).json()
+         if not c.get("is_open"):
+           t = dt.datetime.fromisoformat(c["next_open"].replace("Z","+00:00"))
+           sec = max(0,(t - dt.datetime.now(dt.timezone.utc)).total_seconds()) + 3
+           if sec > 7200:  # > 2 hours? let the next cron run do it
+             print(f"Next open in {sec/3600:.1f}h — skipping; next cron will handle."); sys.exit(0)
+           print(f"Sleep {sec:.1f}s → bell"); time.sleep(sec)
+         else:
+           print("Market open — continuing.")
 
-      - name: Execute open buys (Alpaca)
-        if: ${{ github.event_name == 'schedule' }}
+      - name: Decide if today is first session after last Friday
+        if: ${{ github.event_name == 'schedule' && (github.event.schedule == '28 13 * * 1-5' || github.event.schedule == '28 14 * * 1-5') }}
+        id: buygate
+        env:
+          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          ALPACA_ENV:    paper
+        shell: python
+        run: |
+          import os,requests,datetime as dt
+          from zoneinfo import ZoneInfo
+          base = "https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
+          h = {"APCA-API-KEY-ID": os.environ["ALPACA_KEY"], "APCA-API-SECRET-KEY": os.environ["ALPACA_SECRET"]}
+          friday = "${{ steps.when.outputs.friday }}"
+          start = (dt.date.fromisoformat(friday) + dt.timedelta(days=1)).isoformat()
+          end   = (dt.date.fromisoformat(friday) + dt.timedelta(days=6)).isoformat()
+          cal = requests.get(f"{base}/v2/calendar", params={"start": start, "end": end}, headers=h, timeout=20).json()
+          first = (cal[0]["date"] if cal else None)
+          today_ny = dt.datetime.now(dt.timezone.utc).astimezone(ZoneInfo("America/New_York")).date().isoformat()
+          do = "1" if first and today_ny == first else "0"
+          print(f"First session after {friday}: {first} | Today: {today_ny} | BUY={do}")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f: f.write(f"do={do}\n")
+
+      - name: Execute Monday buys (Top-K) with day-1 ATR stop
+        if: ${{ github.event_name == 'schedule' && (github.event.schedule == '28 13 * * 1-5' || github.event.schedule == '28 14 * * 1-5') && steps.buygate.outputs.do == '1' }}
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
