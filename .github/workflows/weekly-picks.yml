@@ -132,20 +132,21 @@ jobs:
           else:
               print("We're within the post-open window; continuing immediately.")
 
-      - name: Execute Monday buys (Alpaca)
-        if: ${{ github.event_name == 'schedule' }}   # only on cron
+      - name: Execute open buys (Alpaca)
+        if: ${{ github.event_name == 'schedule' }}
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
-          ALPACA_ENV:    paper          # change to 'live' when ready
-          NOTIONAL_PER:  "5000"         # dollars per position
+          ALPACA_ENV:    paper
+          NOTIONAL_PER:  "5000"
         shell: bash
         run: |
+          WEEK_VAL="${WEEK:-${{ steps.when.outputs.friday }}}"
           python execute_orders.py \
             --broker alpaca \
             --data-dir stock_data_400 \
             --picklist backtests/picklist_highrsi_trend.csv \
-            --week "${WEEK}" \
+            --week "$WEEK_VAL" \
             --topk "${{ env.TOPK }}" \
             --side buy \
             --notional "${NOTIONAL_PER}"
@@ -457,16 +458,16 @@ jobs:
           print(f'\nSaved full latest-week table to {out}')
 
       - name: Compute trailing stops (ratcheting) and write report
-        env:
-          WEEK:   ${{ env.WEEK }}                             # set earlier by your "Derive WEEK" step
-          MONDAY: ${{ steps.when.outputs.monday }}            # from Compute last Friday
         shell: bash
         run: |
+          WEEK_VAL="${WEEK:-${{ steps.when.outputs.friday }}}"
+          MON_VAL="${{ steps.when.outputs.monday }}"
+          echo "Using WEEK=$WEEK_VAL  MONDAY=$MON_VAL"
           python trailing_stops.py \
             --data-dir stock_data_400 \
             --picklist backtests/picklist_highrsi_trend.csv \
-            --week "${WEEK}" \
-            --monday "${MONDAY}" \
+            --week "$WEEK_VAL" \
+            --monday "$MON_VAL" \
             --topk "${{ env.TOPK }}" \
             --positions backtests/positions.json \
             --method pct \
