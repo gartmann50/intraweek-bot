@@ -309,6 +309,45 @@ jobs:
           df = pd.read_csv(files[0]).head()
           print(df.to_string(index=False))
 
+      - name: Make equities-only universe from dataset (type=CS + cap floor)
+        env:
+          POLY_KEY:  ${{ secrets.POLYGON_API_KEY }}
+          FRIDAY:    ${{ steps.when.outputs.friday }}
+          CAP_MIN:   "5000000000"  # $5B; bump to 10000000000 for $10B, etc.
+          EXCLUDE_SYMS: "SPLK,SGEN,SPY,QQQ,IWM,VOO,VTI,DIA,XLK"
+        shell: python
+        run: |
+          import os, glob, csv, time, requests, pathlib
+          key=os.getenv('POLY_KEY'); friday=os.getenv('FRIDAY'); cap_min=float(os.getenv('CAP_MIN','0'))
+          if not key: raise SystemExit("Missing POLYGON_API_KEY secret")
+          # gather symbols from your dataset (handles TICKER.csv or TICKER_*.csv)
+          files = glob.glob('stock_data_400/*.csv')
+          syms  = sorted({ pathlib.Path(p).stem.split('_')[0].upper() for p in files })
+          # optional manual excludes
+          ban={s.strip().upper() for s in os.getenv('EXCLUDE_SYMS','').split(',') if s.strip()}
+          try:
+              with open('universe/exclude.txt',encoding='utf-8') as f:
+                  ban |= {l.strip().upper() for l in f if l.strip() and not l.strip().startswith('#')}
+          except FileNotFoundError:
+              pass
+          # polygon overview per symbol → type + market_cap on Friday
+          def ok(sym):
+              for k in range(5):
+                  r = requests.get(f'https://api.polygon.io/v3/reference/tickers/{sym}',
+                                   params={'date':friday,'apiKey':key}, timeout=20)
+                  if r.status_code != 429:
+                      r.raise_for_status()
+                      j = (r.json() or {}).get('results',{}) or {}
+                      t = j.get('type'); mc = j.get('market_cap') or 0
+                      return (t == 'CS') and (float(mc) >= cap_min)
+                  time.sleep(0.5*(2**k))  # backoff
+              r.raise_for_status()
+          allowed = [s for s in syms if s not in ban and ok(s)]
+          out = pathlib.Path('universe/top_cs_cap.csv'); out.parent.mkdir(parents=True, exist_ok=True)
+          with out.open('w', newline='') as f:
+              w=csv.writer(f); w.writerow(['symbol']); w.writerows([[s] for s in allowed])
+          print(f'Universe saved → {out}  syms={len(allowed)} (cap_min={int(cap_min):,})')
+
       # --- BUILD PICKLIST ---
       - name: Build weekly picklist (RSI≥68, rank=rsi, ext20≤0.15, Top-40/wk)
         run: |
