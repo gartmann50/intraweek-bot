@@ -431,6 +431,31 @@ jobs:
           wdf.to_csv(out, index=False)
           print(f'\nSaved full latest-week table to {out}')
 
+      - name: Compute trailing stops (ratcheting) and write report
+        env:
+          WEEK:   ${{ env.WEEK }}                             # set earlier by your "Derive WEEK" step
+          MONDAY: ${{ steps.when.outputs.monday }}            # from Compute last Friday
+        shell: bash
+        run: |
+          python trailing_stops.py \
+            --data-dir stock_data_400 \
+            --picklist backtests/picklist_highrsi_trend.csv \
+            --week "${WEEK}" \
+            --monday "${MONDAY}" \
+            --topk "${{ env.TOPK }}" \
+            --positions backtests/positions.json \
+            --method pct \
+            --trail-pct 0.10
+
+      - name: Upload trailing-stop artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: trailing-stops-${{ steps.when.outputs.friday }}
+          path: |
+            backtests/positions.json
+            backtests/stops.csv
+            backtests/trailing_report.txt
+
       - name: Upload latest-week debug CSV
         if: always()
         uses: actions/upload-artifact@v4
