@@ -9,6 +9,7 @@ import argparse, json, math, os, pathlib, sys
 from datetime import datetime, timezone
 import pandas as pd
 import requests
+import time  # for a short wait until fills
 
 def last_close_from_csv(data_dir: pathlib.Path, sym: str) -> float:
     p = data_dir / f"{sym}.csv"
@@ -50,6 +51,32 @@ def place_alpaca_order(base: str, key: str, secret: str, payload: dict) -> dict:
         j.setdefault("error", f"HTTP {r.status_code}")
     return j
 
+def atr14_from_csv(data_dir, sym):
+    p = (data_dir / f"{sym}.csv")
+    df = pd.read_csv(p).rename(columns=str.lower)
+    for k in ("date","high","low","close"):
+        if k not in df: raise ValueError(f"{p.name} missing {k}")
+    df = df.sort_values("date")
+    prev = df["close"].shift(1)
+    tr = pd.concat([(df["high"]-df["low"]).abs(),
+                    (df["high"]-prev).abs(),
+                    (df["low"]-prev).abs()], axis=1).max(axis=1)
+    a = tr.rolling(14, min_periods=14).mean().iloc[-1]
+    return float(a) if pd.notna(a) else None
+
+def wait_filled(base, key, secret, oid, timeout=120, interval=2):
+    h = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret}
+    t0 = time.time(); last = {}
+    while time.time()-t0 < timeout:
+        r = requests.get(f"{base}/v2/orders/{oid}", headers=h, timeout=15)
+        try: j = r.json()
+        except: j = {}
+        last = j or last
+        if (j.get("status","").lower() in {"filled","partially_filled","canceled","rejected","expired"}):
+            return j
+        time.sleep(interval)
+    return last
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--broker", choices=["alpaca"], default="alpaca")
@@ -60,6 +87,12 @@ def main():
     ap.add_argument("--side", choices=["buy","sell"], required=True)
     ap.add_argument("--notional", type=float, default=5000.0, help="USD per trade (fallback to qty if notional not allowed)")
     ap.add_argument("--qty", type=int, default=0, help="override share qty (if >0, ignores notional)")
+    ap.add_argument("--init-stop-atr-mult", type=float, default=1.75,
+                help="Entry-day stop = fill - ATR14*mult (DAY). If ATR missing, falls back to --init-stop-pct.")
+    ap.add_argument("--init-stop-pct", type=float, default=0.10,
+                help="Fallback: entry-day stop at pct below fill (DAY) if ATR unavailable.")
+    
+    
     # Alpaca creds come from env
     args = ap.parse_args()
 
@@ -116,6 +149,40 @@ def main():
             j = {"first_attempt": j, "retry_qty": j2}
         results.append({"symbol": body["symbol"], "request": body, "response": j})
 
+        if args.side == "buy" and (args.init_stop_atr_mult > 0 or args.init_stop_pct > 0):
+          for row in results:
+              sym = row["symbol"]
+              oid = (row["response"].get("id") or row["response"].get("retry_qty",{}).get("id"))
+              if not oid: 
+                 print(f"{sym}: no order id; skip stop."); 
+                 continue
+        fill = wait_filled(base, alp_key, alp_secret, oid, timeout=90, interval=1)
+        # qty + fill price
+        qty = int(float(fill.get("filled_qty","0") or 0)) or get_position_qty(base, alp_key, alp_secret, sym)
+        try: price = float(fill.get("filled_avg_price"))
+        except: price = last_close_from_csv(data_dir, sym)
+        if qty <= 0:
+            print(f"{sym}: skip stop (qty=0)"); 
+            continue
+        # compute stop
+        atr = None
+        try: atr = atr14_from_csv(data_dir, sym)
+        except Exception: pass
+        if atr and atr > 0:
+            stop_px = max(0.01, price - args.init_stop_atr_mult * atr)
+            basis = f"ATR14*{args.init_stop_atr_mult}"
+        else:
+            stop_px = max(0.01, price * (1.0 - args.init_stop_pct))
+            basis = f"{args.init_stop_pct*100:.1f}%"
+        # submit DAY stop
+        payload = {"symbol": sym, "side": "sell", "type": "stop",
+                   "time_in_force": "day", "qty": str(qty),
+                   "stop_price": f"{stop_px:.2f}"}
+        s = place_alpaca_order(base, alp_key, alp_secret, payload)
+        row["init_stop"] = {"qty": qty, "stop_price": round(stop_px,2), "basis": basis, "response": s}
+        sid = s.get("id") or s.get("error","n/a")
+        print(f"{sym}: DAY stop placed qty={qty} stop={stop_px:.2f} basis={basis} id={sid}")
+    
     # log file
     outdir = pathlib.Path("backtests"); outdir.mkdir(exist_ok=True, parents=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
@@ -132,3 +199,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
