@@ -4,8 +4,10 @@ on:
   # Auto: every Friday 20:15 UTC  ≈ 22:15 in Oslo during summer
   # (in winter this fires at 21:15 Oslo; see note below)
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "15 20 * * 5"
     - cron: "15 21 * * 5"
+    - cron: "28 13 * * 1"      # when U.S. is on EDT (open = 13:30 UTC)
+    - cron: "28 14 * * 1"      # when U.S. is on EST (open = 14:30 UTC)
 
   # Manual: keep your existing inputs
   workflow_dispatch:
@@ -29,6 +31,10 @@ on:
         required: false
         default: "6"
         type: string
+      
+concurrency:
+     group: weekly-picks
+     cancel-in-progress: true
 
 jobs:
   main:
