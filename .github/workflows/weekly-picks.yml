@@ -107,30 +107,51 @@ jobs:
           PY
 
       - name: Gate to U.S. open (Alpaca clock, max 2h sleep)
-        # if: ${{ github.event_name == 'schedule' && (github.event.schedule == '28 13 * * 1-5' || github.event.schedule == '28 14 * * 1-5') }}
         if: ${{ (github.event_name == 'schedule' &&
-            (github.event.schedule == '28 13 * * 1-5' ||
-             github.event.schedule == '28 14 * * 1-5'))
-          || (github.event_name == 'workflow_dispatch' && inputs.run_open == true) }}
-        
+                  (github.event.schedule == '28 13 * * 1-5' ||
+                   github.event.schedule == '28 14 * * 1-5')) ||
+                (github.event_name == 'workflow_dispatch' && inputs.run_open == true) }}
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
           ALPACA_ENV:    paper
         shell: python
         run: |
-         import os,time,sys,requests,datetime as dt
-         base = "https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
-         h = {"APCA-API-KEY-ID": os.environ["ALPACA_KEY"], "APCA-API-SECRET-KEY": os.environ["ALPACA_SECRET"]}
-         c = requests.get(f"{base}/v2/clock", headers=h, timeout=20).json()
-         if not c.get("is_open"):
-           t = dt.datetime.fromisoformat(c["next_open"].replace("Z","+00:00"))
-           sec = max(0,(t - dt.datetime.now(dt.timezone.utc)).total_seconds()) + 3
-           if sec > 7200:  # > 2 hours? let the next cron run do it
-             print(f"Next open in {sec/3600:.1f}h — skipping; next cron will handle."); sys.exit(0)
-           print(f"Sleep {sec:.1f}s → bell"); time.sleep(sec)
-         else:
-           print("Market open — continuing.")
+          import os, time, sys, requests, datetime as dt
+
+          key = os.getenv("ALPACA_KEY"); sec = os.getenv("ALPACA_SECRET")
+          env = os.getenv("ALPACA_ENV","paper")
+          base = "https://paper-api.alpaca.markets" if env.startswith("paper") else "https://api.alpaca.markets"
+
+          if not key or not sec:
+              print("ERROR: missing ALPACA_KEY / ALPACA_SECRET (repo Settings → Secrets and variables → Actions).")
+              sys.exit(1)
+
+          h = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": sec}
+          r = requests.get(f"{base}/v2/clock", headers=h, timeout=20)
+          print("Clock status:", r.status_code)
+          ctype = r.headers.get("content-type","")
+          if "application/json" not in ctype:
+              print("Clock body (first 400 chars):\n", r.text[:400])
+              r.raise_for_status()
+
+          clk = r.json()
+          print("Clock JSON:", clk)
+
+          if not clk.get("is_open"):
+              next_open = dt.datetime.fromisoformat(clk["next_open"].replace("Z","+00:00"))
+              now = dt.datetime.now(dt.timezone.utc)
+              wait = (next_open - now).total_seconds()
+              print(f"Now(UTC)={now}  next_open={next_open}  wait_sec={int(wait)}")
+
+              # sleep only if the open is within 2h; otherwise exit neutral
+              if 0 < wait <= 7200:
+                  time.sleep(int(wait))
+              elif wait > 7200:
+                  print("Open more than 2h away — exiting neutral.")
+                  sys.exit(78)
+
+          print("Market open — continuing.")
 
       - name: Execute exits at open (if any)
         if: ${{ (github.event_name == 'schedule' &&
