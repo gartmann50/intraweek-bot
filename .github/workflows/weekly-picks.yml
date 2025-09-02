@@ -242,32 +242,46 @@ jobs:
              ls -lh backtests/picklist_highrsi_trend.csv
            fi
 
+      - name: Debug — inspect picklist before buys
+        shell: python
+        run: |
+          import pathlib, pandas as pd, sys
+          p = pathlib.Path("backtests/picklist_highrsi_trend.csv")
+          if not p.exists():
+              print("ERROR: missing", p); sys.exit(1)
+          df = pd.read_csv(p)
+          print("Picklist rows:", len(df), "columns:", list(df.columns))
+          print(df.head(12).to_string(index=False))
+          if df.empty:
+              print("Picklist is empty — aborting buys.")
+              sys.exit(78)
+
       - name: Prepare buy list from picklist (robust week select)
         shell: python
         run: |
-          import os, pandas as pd
-          path = "backtests/picklist_highrsi_trend.csv"
+          import os, sys, pandas as pd, pathlib
+          path = pathlib.Path("backtests/picklist_highrsi_trend.csv")
           df = pd.read_csv(path)
-          col = "week_start" if "week_start" in df.columns else ("week" if "week" in df.columns else None)
-          assert col, f"No week column in {path}"
 
-          # Show what weeks the file actually has
-          wdates = pd.to_datetime(df[col], errors="coerce").dt.date.dropna()
-          uniq = sorted(set(wdates))
+          # pick the week column
+          col = "week_start" if "week_start" in df.columns else ("week" if "week" in df.columns else None)
+          if not col:
+              print("ERROR: no week column in picklist. Columns:", list(df.columns)); sys.exit(1)
+
+          # parse dates and show what weeks exist
+          ser = pd.to_datetime(df[col], errors="coerce")
+          uniq = sorted(set(ser.dropna().dt.date))
           print("Weeks present (last 8):", [d.isoformat() for d in uniq[-8:]])
 
-          # Choose WEEK:
-          # 1) prefer env WEEK (written by 'Derive WEEK from picklist')
-          # 2) else prefer the latest week in the file
-          week = os.environ.get("WEEK")
-          if week:
-            print("Using WEEK from env:", week)
-          else:
-              week = (max(uniq)).isoformat()
-              print("Env WEEK missing; using latest in picklist:", week)
+          # choose target week: prefer env WEEK (from the Derive step), else latest present
+          week = os.environ.get("WEEK") or (uniq[-1].isoformat() if uniq else None)
+          print("Chosen WEEK:", week)
+          if not week:
+              print("ERROR: no parsable weeks in picklist. Sample raw values:", df[col].dropna().astype(str).head(10).tolist())
+              sys.exit(1)
 
-          sel = df[wdates.astype(str) == week].copy()
-          # Sort: rank asc, tie-break by score desc
+          # select and sort (rank asc, score desc)
+          sel = df[ser.dt.date.astype(str) == week].copy()
           if "rank" in sel.columns:
               sel = sel.sort_values(["rank","score"], ascending=[True, False])
           elif "score" in sel.columns:
@@ -278,9 +292,9 @@ jobs:
           print(f"WEEK={week} | candidates={len(sel)} | picks={picks}")
 
           if not picks:
-              raise SystemExit("No picks found for chosen WEEK; aborting buys.")
-          os.makedirs("backtests", exist_ok=True)
-          open("backtests/buy_symbols.txt", "w").write("\n".join(picks))
+              print("No picks for chosen WEEK — aborting buys."); sys.exit(78)
+          pathlib.Path("backtests").mkdir(parents=True, exist_ok=True)
+          open("backtests/buy_symbols.txt","w").write("\n".join(picks))
 
       - name: Execute Monday buys (Top-K) with day-1 ATR stop
         if: ${{ (
