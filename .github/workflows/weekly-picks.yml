@@ -258,7 +258,7 @@ jobs:
           NOTIONAL_PER:  "5000"
         shell: bash
         run: |
-          WEEK_VAL="${WEEK:-${{ steps.when.outputs.friday }}}"
+          WEEK_VAL="${WEEK:-${{ steps.when.outputs.monday }}}"
           python execute_orders.py \
             --broker alpaca \
             --data-dir stock_data_400 \
