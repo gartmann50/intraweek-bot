@@ -242,29 +242,45 @@ jobs:
              ls -lh backtests/picklist_highrsi_trend.csv
            fi
 
-      - name: Prepare buy list from picklist (use Monday week)
+      - name: Prepare buy list from picklist (robust week select)
         shell: python
         run: |
           import os, pandas as pd
-          week = os.environ.get("WEEK") or "${{ steps.when.outputs.monday }}"
-          topk = int("${{ env.TOPK }}")
           path = "backtests/picklist_highrsi_trend.csv"
           df = pd.read_csv(path)
           col = "week_start" if "week_start" in df.columns else ("week" if "week" in df.columns else None)
           assert col, f"No week column in {path}"
-          d = pd.to_datetime(df[col], errors="coerce").dt.date.astype(str)
-          sel = df[d == week].copy()
-          # rank first (asc), then score (desc) as tie-breaker
+
+          # Show what weeks the file actually has
+          wdates = pd.to_datetime(df[col], errors="coerce").dt.date.dropna()
+          uniq = sorted(set(wdates))
+          print("Weeks present (last 8):", [d.isoformat() for d in uniq[-8:]])
+
+          # Choose WEEK:
+          # 1) prefer env WEEK (written by 'Derive WEEK from picklist')
+          # 2) else prefer the latest week in the file
+          week = os.environ.get("WEEK")
+          if week:
+            print("Using WEEK from env:", week)
+          else:
+              week = (max(uniq)).isoformat()
+              print("Env WEEK missing; using latest in picklist:", week)
+
+          sel = df[wdates.astype(str) == week].copy()
+          # Sort: rank asc, tie-break by score desc
           if "rank" in sel.columns:
               sel = sel.sort_values(["rank","score"], ascending=[True, False])
           elif "score" in sel.columns:
               sel = sel.sort_values("score", ascending=False)
+
+          topk = int(os.environ.get("TOPK", "6"))
           picks = sel["symbol"].head(topk).dropna().astype(str).tolist()
-          print("WEEK (Mon) =", week, "| candidates =", len(sel), "| picks =", picks)
-          os.makedirs("backtests", exist_ok=True)
-          open("backtests/buy_symbols.txt","w").write("\n".join(picks))
+          print(f"WEEK={week} | candidates={len(sel)} | picks={picks}")
+
           if not picks:
-             raise SystemExit("No picks for Monday week; aborting buys.")
+              raise SystemExit("No picks found for chosen WEEK; aborting buys.")
+          os.makedirs("backtests", exist_ok=True)
+          open("backtests/buy_symbols.txt", "w").write("\n".join(picks))
 
       - name: Execute Monday buys (Top-K) with day-1 ATR stop
         if: ${{ (
