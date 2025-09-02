@@ -242,10 +242,34 @@ jobs:
              ls -lh backtests/picklist_highrsi_trend.csv
            fi
 
+      - name: Prepare buy list from picklist (use Monday week)
+        shell: python
+        run: |
+          import os, pandas as pd
+          week = os.environ.get("WEEK") or "${{ steps.when.outputs.monday }}"
+          topk = int("${{ env.TOPK }}")
+          path = "backtests/picklist_highrsi_trend.csv"
+          df = pd.read_csv(path)
+          col = "week_start" if "week_start" in df.columns else ("week" if "week" in df.columns else None)
+          assert col, f"No week column in {path}"
+          d = pd.to_datetime(df[col], errors="coerce").dt.date.astype(str)
+          sel = df[d == week].copy()
+          # rank first (asc), then score (desc) as tie-breaker
+          if "rank" in sel.columns:
+              sel = sel.sort_values(["rank","score"], ascending=[True, False])
+          elif "score" in sel.columns:
+              sel = sel.sort_values("score", ascending=False)
+          picks = sel["symbol"].head(topk).dropna().astype(str).tolist()
+          print("WEEK (Mon) =", week, "| candidates =", len(sel), "| picks =", picks)
+          os.makedirs("backtests", exist_ok=True)
+          open("backtests/buy_symbols.txt","w").write("\n".join(picks))
+          if not picks:
+             raise SystemExit("No picks for Monday week; aborting buys.")
+
       - name: Execute Monday buys (Top-K) with day-1 ATR stop
         if: ${{ (
                 (github.event_name == 'schedule' &&
-                 (github.event.schedule == '28 13 * * 1-5' ||
+                (github.event.schedule == '28 13 * * 1-5' ||
                   github.event.schedule == '28 14 * * 1-5')) ||
                 (github.event_name == 'workflow_dispatch' && inputs.run_open == true)
               ) && (
@@ -259,16 +283,17 @@ jobs:
         shell: bash
         run: |
           WEEK_VAL="${WEEK:-${{ steps.when.outputs.monday }}}"
+          echo "Buying for WEEK=$WEEK_VAL using symbols from backtests/buy_symbols.txt"
           python execute_orders.py \
             --broker alpaca \
             --data-dir stock_data_400 \
             --picklist backtests/picklist_highrsi_trend.csv \
             --week "$WEEK_VAL" \
-            --topk "${{ env.TOPK }}" \
             --side buy \
             --notional "${NOTIONAL_PER}" \
-            --init-stop-atr-mult 1.75
-
+            --init-stop-atr-mult 1.75 \
+            --symbols-file backtests/buy_symbols.txt
+      
       - name: Upload order log
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
