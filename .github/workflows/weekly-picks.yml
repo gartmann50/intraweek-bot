@@ -2,8 +2,6 @@ name: Weekly Picks
 
 on:
   schedule:
-    # TEMP: fire every 5 minutes to prove cron works (remove after test)
-    - cron: "*/5 * * * *"
 
     # After U.S. close (Mon–Thu) — update trailing stops
     - cron: "15 20 * * 1-4"   # EDT
@@ -36,12 +34,12 @@ on:
         type: string
       run_open:
         description: "Run MARKET-OPEN path now (manual test)"
-        required: false
+        required: true
         type: boolean
         default: false
       force_buy:
         description: "Force weekly buy even if not first session (manual test)"
-        required: false
+        required: true
         type: boolean
         default: false
 
