@@ -106,6 +106,96 @@ jobs:
           print("MONDAY=", mon)
           PY
 
+      - name: Cache dataset between runs
+        uses: actions/cache@v4
+        with:
+          path: stock_data_400
+          key: polygon-dataset-${{ steps.when.outputs.friday }}-max500
+          restore-keys: |
+            polygon-dataset-
+
+      - name: Fetch dataset for curated universe (build stock_data_400.zip)
+        env:
+          POLY_KEY: ${{ secrets.POLYGON_API_KEY }}
+          FRIDAY:   ${{ steps.when.outputs.friday }}
+          SINCE:    "2023-01-01"
+        shell: python
+        run: |
+          import os, csv, time, zipfile, pathlib, datetime as dt, requests, pandas as pd
+          key=os.getenv("POLY_KEY"); friday=os.getenv("FRIDAY"); since=os.getenv("SINCE","2023-01-01")
+          if not key: raise SystemExit("Missing POLYGON_API_KEY")
+
+          # 1) read curated allow-list (must exist)
+          u=pathlib.Path("universe/top400_weekly.csv")
+          if not u.exists(): raise SystemExit("universe/top400_weekly.csv not found (commit it to the repo)")
+          syms=pd.read_csv(u)["symbol"].astype(str).str.upper().dropna().unique().tolist()
+          print(f"Curated universe: {len(syms)} symbols from {u}")
+
+          # 2) download/append daily bars for each symbol
+          ddir=pathlib.Path("stock_data_400"); ddir.mkdir(exist_ok=True)
+          headers=["Date","Open","High","Low","Close","Volume"]
+          agg="https://api.polygon.io/v2/aggs/ticker/{sym}/range/1/day/{start}/{end}"
+
+          def fetch(sym, start, end):
+            for k in range(6):
+              r=requests.get(agg.format(sym=sym,start=start,end=end),
+                             params={"adjusted":"true","limit":50000,"sort":"asc","apiKey":key}, timeout=30)
+              if r.status_code!=429:
+                if r.status_code==404: return []  # skip unknown/delisted
+                r.raise_for_status(); return r.json().get("results",[]) or []
+              time.sleep(0.5*(2**k))
+            return []
+
+          added=0; updated=0
+          for i,s in enumerate(syms,1):
+            p=ddir/f"{s}.csv"
+            start=since
+            if p.exists():
+              try:
+                last=pd.read_csv(p,usecols=[0]).iloc[-1,0]
+                start=(pd.to_datetime(last).date()+dt.timedelta(days=1)).isoformat()
+              except Exception: start=since
+            if start>friday: continue
+            rows=fetch(s, start, friday)
+            if not rows: continue
+            mode="a" if p.exists() and start!=since else "w"
+            with p.open(mode, newline="") as f:
+              w=csv.writer(f)
+              if mode=="w": w.writerow(headers)
+              for bar in rows:
+                d=dt.datetime.utcfromtimestamp(bar["t"]/1000).date().isoformat()
+                w.writerow([d,bar["o"],bar["h"],bar["l"],bar["c"],bar["v"]])
+                added+=1
+            updated+=1
+            if i%50==0: print(f"{i}/{len(syms)} processed …")
+            time.sleep(0.05)
+
+          # 3) zip for the next step
+          z=pathlib.Path("stock_data_400.zip")
+          with zipfile.ZipFile(z,"w",compression=zipfile.ZIP_DEFLATED) as zipf:
+            for p in ddir.glob("*.csv"): zipf.write(p, arcname=p.name)
+          print(f"Built {z} | files={len(list(ddir.glob('*.csv')))} | updated_syms={updated} | new_rows={added}")
+
+      - name: Unpack EOD dataset if zip present
+        if: hashFiles('stock_data_400.zip') != ''
+        shell: python
+        run: |
+          import os, zipfile, shutil, pathlib
+
+           z = zipfile.ZipFile('stock_data_400.zip')
+           os.makedirs('stock_data_400', exist_ok=True)
+           z.extractall('stock_data_400')
+
+           moved = 0
+           for p in pathlib.Path('stock_data_400').rglob('*.csv'):
+              dst = pathlib.Path('stock_data_400') / p.name
+              if p.resolve() != dst.resolve():
+                 shutil.move(str(p), str(dst))
+                 moved += 1
+
+           csvs = [p for p in os.listdir('stock_data_400') if p.lower().endswith('.csv')]
+           print("Unzipped CSVs:", len(csvs), "(moved:", moved, ")")
+
       - name: Gate to U.S. open (Alpaca clock, max 2h sleep)
         if: ${{ (github.event_name == 'schedule' &&
                   (github.event.schedule == '28 13 * * 1-5' ||
@@ -331,13 +421,7 @@ jobs:
           name: orders-${{ steps.when.outputs.friday }}
           path: backtests/orders_*.json
 
-      - name: Cache dataset between runs
-        uses: actions/cache@v4
-        with:
-          path: stock_data_400
-          key: polygon-dataset-${{ steps.when.outputs.friday }}-max500
-          restore-keys: |
-            polygon-dataset-
+      
 
       - name: Slack — Open recap (only if orders)
         if: ${{ always() }}
@@ -357,87 +441,8 @@ jobs:
           payload=$(jq -Rn --arg t "*Intraweek Bot — Open recap*\n```$lines```" '{text:$t}')
           curl -fsS -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL" >/dev/null && echo "Slack message sent."
 
-      - name: Fetch dataset for curated universe (build stock_data_400.zip)
-        env:
-          POLY_KEY: ${{ secrets.POLYGON_API_KEY }}
-          FRIDAY:   ${{ steps.when.outputs.friday }}
-          SINCE:    "2023-01-01"
-        shell: python
-        run: |
-          import os, csv, time, zipfile, pathlib, datetime as dt, requests, pandas as pd
-          key=os.getenv("POLY_KEY"); friday=os.getenv("FRIDAY"); since=os.getenv("SINCE","2023-01-01")
-          if not key: raise SystemExit("Missing POLYGON_API_KEY")
-
-          # 1) read curated allow-list (must exist)
-          u=pathlib.Path("universe/top400_weekly.csv")
-          if not u.exists(): raise SystemExit("universe/top400_weekly.csv not found (commit it to the repo)")
-          syms=pd.read_csv(u)["symbol"].astype(str).str.upper().dropna().unique().tolist()
-          print(f"Curated universe: {len(syms)} symbols from {u}")
-
-          # 2) download/append daily bars for each symbol
-          ddir=pathlib.Path("stock_data_400"); ddir.mkdir(exist_ok=True)
-          headers=["Date","Open","High","Low","Close","Volume"]
-          agg="https://api.polygon.io/v2/aggs/ticker/{sym}/range/1/day/{start}/{end}"
-
-          def fetch(sym, start, end):
-            for k in range(6):
-              r=requests.get(agg.format(sym=sym,start=start,end=end),
-                             params={"adjusted":"true","limit":50000,"sort":"asc","apiKey":key}, timeout=30)
-              if r.status_code!=429:
-                if r.status_code==404: return []  # skip unknown/delisted
-                r.raise_for_status(); return r.json().get("results",[]) or []
-              time.sleep(0.5*(2**k))
-            return []
-
-          added=0; updated=0
-          for i,s in enumerate(syms,1):
-            p=ddir/f"{s}.csv"
-            start=since
-            if p.exists():
-              try:
-                last=pd.read_csv(p,usecols=[0]).iloc[-1,0]
-                start=(pd.to_datetime(last).date()+dt.timedelta(days=1)).isoformat()
-              except Exception: start=since
-            if start>friday: continue
-            rows=fetch(s, start, friday)
-            if not rows: continue
-            mode="a" if p.exists() and start!=since else "w"
-            with p.open(mode, newline="") as f:
-              w=csv.writer(f)
-              if mode=="w": w.writerow(headers)
-              for bar in rows:
-                d=dt.datetime.utcfromtimestamp(bar["t"]/1000).date().isoformat()
-                w.writerow([d,bar["o"],bar["h"],bar["l"],bar["c"],bar["v"]])
-                added+=1
-            updated+=1
-            if i%50==0: print(f"{i}/{len(syms)} processed …")
-            time.sleep(0.05)
-
-          # 3) zip for the next step
-          z=pathlib.Path("stock_data_400.zip")
-          with zipfile.ZipFile(z,"w",compression=zipfile.ZIP_DEFLATED) as zipf:
-            for p in ddir.glob("*.csv"): zipf.write(p, arcname=p.name)
-          print(f"Built {z} | files={len(list(ddir.glob('*.csv')))} | updated_syms={updated} | new_rows={added}")
-
-      - name: Unpack EOD dataset if zip present
-        if: hashFiles('stock_data_400.zip') != ''
-        shell: python
-        run: |
-          import os, zipfile, shutil, pathlib
-
-          z = zipfile.ZipFile('stock_data_400.zip')
-          os.makedirs('stock_data_400', exist_ok=True)
-          z.extractall('stock_data_400')
-
-          moved = 0
-          for p in pathlib.Path('stock_data_400').rglob('*.csv'):
-             dst = pathlib.Path('stock_data_400') / p.name
-             if p.resolve() != dst.resolve():
-                shutil.move(str(p), str(dst))
-                moved += 1
-
-          csvs = [p for p in os.listdir('stock_data_400') if p.lower().endswith('.csv')]
-          print("Unzipped CSVs:", len(csvs), "(moved:", moved, ")")
+      
+      
 
       - name: Generate equities-only universe (from dataset + exclude list)
         shell: python
