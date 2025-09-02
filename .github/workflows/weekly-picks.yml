@@ -4,6 +4,8 @@ on:
   # Auto: every Friday 20:15 UTC  ≈ 22:15 in Oslo during summer
   # (in winter this fires at 21:15 Oslo; see note below)
   schedule:
+    # midlertigt
+    - cron: "*/5 * * * *"   
     # Fri after close (keep)
     - cron: "15 20 * * 5"
     - cron: "15 21 * * 5"
@@ -100,7 +102,12 @@ jobs:
           PY
 
       - name: Gate to U.S. open (Alpaca clock, max 2h sleep)
-        if: ${{ github.event_name == 'schedule' && (github.event.schedule == '28 13 * * 1-5' || github.event.schedule == '28 14 * * 1-5') }}
+        # if: ${{ github.event_name == 'schedule' && (github.event.schedule == '28 13 * * 1-5' || github.event.schedule == '28 14 * * 1-5') }}
+        if: ${{ github.event_name == 'schedule' &&
+          (github.event.schedule == '28 13 * * 1-5' ||
+           github.event.schedule == '28 14 * * 1-5' ||
+           github.event.schedule == '*/5 * * * *') }}
+        
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
