@@ -134,11 +134,36 @@ jobs:
          else:
            print("Market open — continuing.")
 
+      - name: Execute exits at open (if any)
+        if: ${{ (github.event_name == 'schedule' &&
+                  (github.event.schedule == '28 13 * * 1-5' ||
+                   github.event.schedule == '28 14 * * 1-5')) ||
+                (github.event_name == 'workflow_dispatch' && inputs.run_open == true) }}
+        env:
+          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          ALPACA_ENV:    paper
+        shell: bash
+        run: |
+          if [ -s backtests/exit_symbols.txt ]; then
+            echo "Selling: $(tr '\n' ',' < backtests/exit_symbols.txt)"
+            python execute_orders.py \
+              --broker alpaca \
+              --data-dir stock_data_400 \
+              --picklist backtests/picklist_highrsi_trend.csv \
+              --week "${WEEK:-${{ steps.when.outputs.friday }}}" \
+              --topk "${{ env.TOPK }}" \
+              --side sell \
+              --symbols-file backtests/exit_symbols.txt
+          else
+            echo "No exits today."
+          fi
+
       - name: Decide if today is first session after last Friday (and log)
         if: ${{ (github.event_name == 'schedule' &&
-            (github.event.schedule == '28 13 * * 1-5' ||
-             github.event.schedule == '28 14 * * 1-5'))
-          || (github.event_name == 'workflow_dispatch' && inputs.run_open == true) }}
+                  (github.event.schedule == '28 13 * * 1-5' ||
+                   github.event.schedule == '28 14 * * 1-5')) ||
+                (github.event_name == 'workflow_dispatch' && inputs.run_open == true) }}
         id: buygate
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
@@ -146,20 +171,33 @@ jobs:
           ALPACA_ENV:    paper
         shell: python
         run: |
-          import os,requests,datetime as dt,json
+          import os,requests,datetime as dt
           from zoneinfo import ZoneInfo
-          base="https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
-          h={"APCA-API-KEY-ID":os.environ["ALPACA_KEY"],"APCA-API-SECRET-KEY":os.environ["ALPACA_SECRET"]}
-          friday="${{ steps.when.outputs.friday }}"
-          start=(dt.date.fromisoformat(friday)+dt.timedelta(days=1)).isoformat()
-          end=(dt.date.fromisoformat(friday)+dt.timedelta(days=6)).isoformat()
-          cal=requests.get(f"{base}/v2/calendar",params={"start":start,"end":end},headers=h,timeout=20).json()
-          first=(cal[0]["date"] if cal else None)
-          today_ny=dt.datetime.now(dt.timezone.utc).astimezone(ZoneInfo("America/New_York")).date().isoformat()
-          do = "1" if first and today_ny==first else "0"
-          with open("backtests/first_session_log.json","w") as f:
-            json.dump({"friday": friday, "first_session": first, "today_ny": today_ny, "buy": do=="1"}, f, indent=2)
-          open(os.environ["GITHUB_OUTPUT"],"a").write(f"do={do}\n")
+
+          base = "https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
+          k = os.getenv("ALPACA_KEY"); s = os.getenv("ALPACA_SECRET")
+          assert k and s, f"Missing Alpaca secrets: key={'set' if k else 'MISSING'}, secret={'set' if s else 'MISSING'}"
+          h = {"APCA-API-KEY-ID": k, "APCA-API-SECRET-KEY": s}
+
+          friday = "${{ steps.when.outputs.friday }}"
+          start  = (dt.date.fromisoformat(friday) + dt.timedelta(days=1)).isoformat()
+          end    = (dt.date.fromisoformat(friday) + dt.timedelta(days=7)).isoformat()
+
+          r = requests.get(f"{base}/v2/calendar", params={"start": start, "end": end}, headers=h, timeout=20)
+          print("Calendar status:", r.status_code)
+          try:
+              cal = r.json()
+          except Exception:
+              print("Calendar body (first 500 chars):\n", r.text[:500])
+              raise
+
+          first = (cal[0]["date"] if cal else None)
+          today_ny = dt.datetime.now(dt.timezone.utc).astimezone(ZoneInfo("America/New_York")).date().isoformat()
+          do = "1" if first and today_ny == first else "0"
+          print(f"First session after {friday}: {first} | Today: {today_ny} | BUY={do}")
+          open(os.environ["GITHUB_OUTPUT"], "a").write(f"do={do}\n")
+     
+      
       - name: Upload first session log
         if: ${{ always() }}
         uses: actions/upload-artifact@v4
@@ -168,15 +206,14 @@ jobs:
           path: backtests/first_session_log.json
 
       - name: Execute Monday buys (Top-K) with day-1 ATR stop
-        if: ${{ ( (github.event_name == 'schedule' &&
-                    (github.event.schedule == '28 13 * * 1-5' ||
-                     github.event.schedule == '28 14 * * 1-5')) ||
-                   (github.event_name == 'workflow_dispatch' && inputs.run_open == true)
-                   ) && (
-                     steps.buygate.outputs.do == '1' || inputs.force_buy == true
-                   ) }}
-
-        
+        if: ${{ (
+                (github.event_name == 'schedule' &&
+                 (github.event.schedule == '28 13 * * 1-5' ||
+                  github.event.schedule == '28 14 * * 1-5')) ||
+                (github.event_name == 'workflow_dispatch' && inputs.run_open == true)
+              ) && (
+                steps.buygate.outputs.do == '1' || inputs.force_buy == true
+              ) }}
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
