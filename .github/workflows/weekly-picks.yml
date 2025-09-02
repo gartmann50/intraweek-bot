@@ -185,6 +185,40 @@ jobs:
           restore-keys: |
             polygon-dataset-
 
+      - name: Slack — Open recap (only if orders)
+        if: ${{ always() }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        shell: python
+        run: |
+          import os, glob, json, urllib.request
+          if not os.getenv("SLACK_WEBHOOK_URL"):
+            print("Slack not configured; skipping."); raise SystemExit(0)
+          paths = sorted(glob.glob("backtests/orders_*.json"))
+          lines = []
+          for p in paths[-5:]:
+            try:
+              data = json.load(open(p))
+              for o in (data if isinstance(data, list) else [data]):
+                sym = o.get("symbol") or o.get("asset_symbol") or "?"
+                side= (o.get("side") or "?").upper()
+                qty = o.get("qty") or o.get("filled_qty") or "-"
+                px  = o.get("filled_avg_price") or o.get("limit_price") or o.get("stop_price") or "-"
+                st  = o.get("status") or "?"
+                lines.append(f"{side} {sym} qty={qty} px={px} status={st}")
+             except Exception as e:
+               lines.append(f"(parse {os.path.basename(p)}: {e})")
+           if not lines:
+             print("No recent orders; not sending Slack message."); raise SystemExit(0)
+           text = "*Intraweek Bot — Open recap*\n```" + "\n".join(lines)[:3500] + "```"
+           req = urllib.request.Request(
+             os.environ["SLACK_WEBHOOK_URL"],
+             data=json.dumps({"text": text}).encode("utf-8"),
+             headers={"Content-Type":"application/json"}
+           )
+           urllib.request.urlopen(req, timeout=10).read()
+           print("Slack message sent.")
+
       - name: Fetch dataset for curated universe (build stock_data_400.zip)
         env:
           POLY_KEY: ${{ secrets.POLYGON_API_KEY }}
