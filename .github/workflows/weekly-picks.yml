@@ -224,6 +224,24 @@ jobs:
           name: first-session-${{ steps.when.outputs.friday }}
           path: backtests/first_session_log.json
 
+      - name: Ensure picklist exists (build if missing)
+        run: |
+          mkdir -p backtests
+          if [ ! -f backtests/picklist_highrsi_trend.csv ]; then
+            echo "Picklist missing — building it now…"
+            python build_picklist_parametric.py \
+              --data-dir stock_data_400 \
+              --rsi-min 68 \
+              --max-ext20 0.15 \
+              --top-per-week 40 \
+              --until "${UNTIL}" \
+              --out backtests/picklist_highrsi_trend.csv
+             ls -lh backtests/picklist_highrsi_trend.csv
+           else
+             echo "Picklist already present:"
+             ls -lh backtests/picklist_highrsi_trend.csv
+           fi
+
       - name: Execute Monday buys (Top-K) with day-1 ATR stop
         if: ${{ (
                 (github.event_name == 'schedule' &&
