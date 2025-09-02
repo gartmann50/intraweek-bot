@@ -520,6 +520,21 @@ jobs:
             backtests/stops.csv
             backtests/trailing_report.txt
 
+      - name: Slack — Exits queued (only if any)
+        if: ${{ github.event_name == 'schedule' && (github.event.schedule == '15 20 * * 1-4' || github.event.schedule == '15 21 * * 1-4' || github.event.schedule == '15 20 * * 5' || github.event.schedule == '15 21 * * 5') }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          if [[ -z "${SLACK_WEBHOOK_URL:-}" ]]; then echo "Slack not configured; skipping."; exit 0; fi
+          if [[ ! -s backtests/exit_symbols.txt ]]; then echo "No exits queued; skipping."; exit 0; fi
+          sudo apt-get update -y >/dev/null && sudo apt-get install -y jq >/dev/null
+          syms=$(tr '\n' ' ' < backtests/exit_symbols.txt | sed 's/[[:space:]]\+/ /g; s/^ *//; s/ *$//')
+          payload=$(jq -Rn --arg t "*Intraweek Bot — Exits queued for next open*\n\`\`\`$syms\`\`\`" '{text:$t}')
+          curl -fsS -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL" >/dev/null && echo "Slack message sent."
+
       - name: Upload latest-week debug CSV
         if: always()
         uses: actions/upload-artifact@v4
