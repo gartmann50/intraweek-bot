@@ -1,36 +1,32 @@
 name: Weekly Picks
 
 on:
-  # Auto: every Friday 20:15 UTC  ≈ 22:15 in Oslo during summer
-  # (in winter this fires at 21:15 Oslo; see note below)
   schedule:
-    # midlertigt
-    - cron: "*/5 * * * *"   
-    # Fri after close (keep)
-    - cron: "15 20 * * 5"
-    - cron: "15 21 * * 5"
-    # Mon–Thu after close (NEW: updates trailing stops nightly)
-    - cron: "15 20 * * 1-4"   # ~20:15 UTC during EDT
-    - cron: "15 21 * * 1-4"   # ~21:15 UTC during EST
-    # Monday open prep (keep)
-    - cron: "28 13 * * 1"     # EDT open
-    - cron: "28 14 * * 1"     # EST open
+    # TEMP: fire every 5 minutes to prove cron works (remove after test)
+    - cron: "*/5 * * * *"
 
-  # Manual: keep your existing inputs
+    # After U.S. close (Mon–Thu) — update trailing stops
+    - cron: "15 20 * * 1-4"   # EDT
+    - cron: "15 21 * * 1-4"   # EST
+
+    # Friday after close — build next week's picks / email
+    - cron: "15 20 * * 5"     # EDT
+    - cron: "15 21 * * 5"     # EST
+
+    # Weekday opens (Mon–Fri) — sells daily; buys only first session after Fri
+    - cron: "28 13 * * 1-5"   # EDT
+    - cron: "28 14 * * 1-5"   # EST
+
   workflow_dispatch:
     inputs:
       mode:
-        description: "Choose: status, build, email_smoke, build_and_email"
+        description: "status | build | email_smoke | build_and_email"
         required: true
         default: build_and_email
         type: choice
-        options:
-          - status
-          - build
-          - email_smoke
-          - build_and_email
+        options: [status, build, email_smoke, build_and_email]
       until:
-        description: "Override Friday (YYYY-MM-DD). Leave empty to auto-pick last Friday (Oslo)"
+        description: "Override Friday (YYYY-MM-DD). Empty = auto (Europe/Oslo)"
         required: false
         type: string
       topk:
