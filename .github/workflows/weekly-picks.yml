@@ -34,6 +34,17 @@ on:
         required: false
         default: "6"
         type: string
+      run_open:
+        description: "Run MARKET-OPEN path now (manual test)"
+        required: false
+        type: boolean
+        default: false
+      force_buy:
+        description: "Force weekly buy even if not first session (manual test)"
+        required: false
+        type: boolean
+        default: false
+
       
 concurrency:
   group: weekly-picks
@@ -101,11 +112,8 @@ jobs:
         # if: ${{ github.event_name == 'schedule' && (github.event.schedule == '28 13 * * 1-5' || github.event.schedule == '28 14 * * 1-5') }}
         if: ${{ (github.event_name == 'schedule' &&
             (github.event.schedule == '28 13 * * 1-5' ||
-             github.event.schedule == '28 14 * * 1-5' ||
-             github.event.schedule == '*/5 * * * *')
-           ) && (
-             steps.buygate.outputs.do == '1'
-            ) }}
+             github.event.schedule == '28 14 * * 1-5'))
+          || (github.event_name == 'workflow_dispatch' && inputs.run_open == true) }}
         
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
@@ -127,7 +135,10 @@ jobs:
            print("Market open — continuing.")
 
       - name: Decide if today is first session after last Friday (and log)
-        if: ${{ github.event_name == 'schedule' && (github.event.schedule == '28 13 * * 1-5' || github.event.schedule == '28 14 * * 1-5') }}
+        if: ${{ (github.event_name == 'schedule' &&
+            (github.event.schedule == '28 13 * * 1-5' ||
+             github.event.schedule == '28 14 * * 1-5'))
+          || (github.event_name == 'workflow_dispatch' && inputs.run_open == true) }}
         id: buygate
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
@@ -157,7 +168,15 @@ jobs:
           path: backtests/first_session_log.json
 
       - name: Execute Monday buys (Top-K) with day-1 ATR stop
-        if: ${{ github.event_name == 'schedule' && (github.event.schedule == '28 13 * * 1-5' || github.event.schedule == '28 14 * * 1-5') && steps.buygate.outputs.do == '1' }}
+        if: ${{ ( (github.event_name == 'schedule' &&
+                    (github.event.schedule == '28 13 * * 1-5' ||
+                     github.event.schedule == '28 14 * * 1-5')) ||
+                   (github.event_name == 'workflow_dispatch' && inputs.run_open == true)
+                   ) && (
+                     steps.buygate.outputs.do == '1' || inputs.force_buy == true
+                   ) }}
+
+        
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
