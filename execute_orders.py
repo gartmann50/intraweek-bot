@@ -10,6 +10,27 @@ from datetime import datetime, timezone
 import pandas as pd
 import requests
 import time  # for a short wait until fills
+import requests  # ensure this import exists
+
+def get_position_qty(base: str, alp_key: str, alp_secret: str, symbol: str) -> int:
+    """
+    Return current position quantity for `symbol` from Alpaca. 0 if none.
+    Works in paper or live based on `base` URL.
+    """
+    try:
+        url = f"{base}/v2/positions/{symbol}"
+        headers = {"APCA-API-KEY-ID": alp_key, "APCA-API-SECRET-KEY": alp_secret}
+        r = requests.get(url, headers=headers, timeout=20)
+        if r.status_code == 404:
+            return 0  # no position
+        r.raise_for_status()
+        data = r.json()
+        # Alpaca returns qty as a string
+        q = data.get("qty") or data.get("quantity") or data.get("qty_available") or "0"
+        return int(float(q))
+    except Exception:
+        return 0
+
 
 def last_close_from_csv(data_dir: pathlib.Path, sym: str) -> float:
     p = data_dir / f"{sym}.csv"
