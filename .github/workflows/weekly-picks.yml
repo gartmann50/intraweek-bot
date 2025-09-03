@@ -576,13 +576,10 @@ jobs:
           open(os.environ["GITHUB_OUTPUT"],"a").write("go=0\n"); sys.exit(0)
 
       - name: Execute exits at open (if any)
-        if: ${{ (github.event_name == 'schedule' &&
-                  (github.event.schedule == '28 13 * * 1-5' ||
-                   github.event.schedule == '28 14 * * 1-5')) ||
-                (github.event_name == 'workflow_dispatch' && inputs.run_open == true) }}
+        if: ${{ steps.gate.outputs.go == '1' }}
         env:
-          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
-          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}      # or your *_API_KEY_ID
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}   # or your *_API_SECRET_KEY
           ALPACA_ENV:    paper
         shell: bash
         run: |
@@ -599,12 +596,9 @@ jobs:
           else
             echo "No exits today."
           fi
-
+      
       - name: Decide if today is first session after last Friday (and log)
-        if: ${{ (github.event_name == 'schedule' &&
-                  (github.event.schedule == '28 13 * * 1-5' ||
-                   github.event.schedule == '28 14 * * 1-5')) ||
-                (github.event_name == 'workflow_dispatch' && inputs.run_open == true) }}
+        if: ${{ steps.gate.outputs.go == '1' }}
         id: buygate
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
@@ -672,30 +666,35 @@ jobs:
 
      
       - name: Prepare buy list from picklist (robust week select)
+        if: ${{ steps.gate.outputs.go == '1' }}
         shell: python
         run: |
-          import os, sys, pandas as pd, pathlib
+          import os, sys, pathlib, pandas as pd
           path = pathlib.Path("backtests/picklist_highrsi_trend.csv")
-          df = pd.read_csv(path)
+          if not path.exists():
+              print("ERROR: picklist missing:", path); sys.exit(78)
 
-          # pick the week column
+          df = pd.read_csv(path)
+          if df.empty:
+             print("Picklist is empty — aborting buys."); sys.exit(78)
+
+          # choose week column
           col = "week_start" if "week_start" in df.columns else ("week" if "week" in df.columns else None)
           if not col:
-              print("ERROR: no week column in picklist. Columns:", list(df.columns)); sys.exit(1)
+             print("ERROR: no week column. Columns:", list(df.columns)); sys.exit(1)
 
-          # parse dates and show what weeks exist
+          # list available weeks
           ser = pd.to_datetime(df[col], errors="coerce")
           uniq = sorted(set(ser.dropna().dt.date))
           print("Weeks present (last 8):", [d.isoformat() for d in uniq[-8:]])
 
-          # choose target week: prefer env WEEK (from the Derive step), else latest present
+          # pick WEEK: prefer env WEEK (from 'Derive WEEK'), else latest in file
           week = os.environ.get("WEEK") or (uniq[-1].isoformat() if uniq else None)
-          print("Chosen WEEK:", week)
           if not week:
-              print("ERROR: no parsable weeks in picklist. Sample raw values:", df[col].dropna().astype(str).head(10).tolist())
-              sys.exit(1)
+             print("ERROR: no parsable weeks in picklist."); sys.exit(1)
+          print("Chosen WEEK:", week)
 
-          # select and sort (rank asc, score desc)
+          # filter + sort (rank asc, score desc)
           sel = df[ser.dt.date.astype(str) == week].copy()
           if "rank" in sel.columns:
               sel = sel.sort_values(["rank","score"], ascending=[True, False])
@@ -703,23 +702,16 @@ jobs:
               sel = sel.sort_values("score", ascending=False)
 
           topk = int(os.environ.get("TOPK", "6"))
-          picks = sel["symbol"].head(topk).dropna().astype(str).tolist()
+          picks = sel["symbol"].dropna().astype(str).head(topk).tolist()
           print(f"WEEK={week} | candidates={len(sel)} | picks={picks}")
-
           if not picks:
               print("No picks for chosen WEEK — aborting buys."); sys.exit(78)
+
           pathlib.Path("backtests").mkdir(parents=True, exist_ok=True)
           open("backtests/buy_symbols.txt","w").write("\n".join(picks))
 
       - name: Execute Monday buys (Top-K) with day-1 ATR stop
-        if: ${{ (
-                (github.event_name == 'schedule' &&
-                (github.event.schedule == '28 13 * * 1-5' ||
-                  github.event.schedule == '28 14 * * 1-5')) ||
-                (github.event_name == 'workflow_dispatch' && inputs.run_open == true)
-              ) && (
-                steps.buygate.outputs.do == '1' || inputs.force_buy == true
-              ) }}
+        if: ${{ steps.gate.outputs.go == '1' && (steps.buygate.outputs.do == '1' || inputs.force_buy == true) }}
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
