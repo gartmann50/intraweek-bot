@@ -708,6 +708,32 @@ jobs:
           pathlib.Path("backtests").mkdir(parents=True, exist_ok=True)
           open("backtests/buy_symbols.txt","w").write("\n".join(picks))
 
+      - name: Debug — Alpaca asset status for TopK
+        if: ${{ steps.gate.outputs.go == '1' }}
+        shell: python
+        env:
+          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          ALPACA_ENV:    paper
+          TOPK:          ${{ env.TOPK }}
+        run: |
+          import os, requests, pandas as pd
+          base = "https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
+          h = {"APCA-API-KEY-ID": os.environ["ALPACA_KEY"], "APCA-API-SECRET-KEY": os.environ["ALPACA_SECRET"]}
+          df = pd.read_csv("backtests/picklist_highrsi_trend.csv")
+          col = "week_start" if "week_start" in df.columns else "week"
+          week = os.environ.get("WEEK") or str(pd.to_datetime(df[col], errors="coerce").dropna().dt.date.max())
+          picks = (df[pd.to_datetime(df[col], errors="coerce").dt.date.astype(str)==week]["symbol"]
+                   .dropna().astype(str).head(int(os.getenv("TOPK","6"))).tolist())
+          print("TopK:", picks)
+          for s in picks:
+            r = requests.get(f"{base}/v2/assets/{s}", headers=h, timeout=20)
+            if r.status_code != 200:
+              print(s, "asset lookup error", r.status_code, r.text); continue
+            a = r.json()
+            print(f"{s}: tradable={a.get('tradable')} fractionable={a.get('fractionable')} "
+                  f"status={a.get('status')} class={a.get('asset_class')}")
+
       - name: Execute Monday buys (Top-K) with day-1 ATR stop
         if: ${{ steps.gate.outputs.go == '1' && (steps.buygate.outputs.do == '1' || inputs.force_buy == true) }}
         env:
