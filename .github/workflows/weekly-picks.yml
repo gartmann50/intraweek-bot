@@ -177,24 +177,19 @@ jobs:
           print(f"Built {z} | files={len(list(ddir.glob('*.csv')))} | updated_syms={updated} | new_rows={added}")
 
       - name: Unpack EOD dataset if zip present
-        if: hashFiles('stock_data_400.zip') != ''
-        shell: python
         run: |
-          import os, zipfile, shutil, pathlib
-
-           z = zipfile.ZipFile('stock_data_400.zip')
-           os.makedirs('stock_data_400', exist_ok=True)
-           z.extractall('stock_data_400')
-
-           moved = 0
-           for p in pathlib.Path('stock_data_400').rglob('*.csv'):
-              dst = pathlib.Path('stock_data_400') / p.name
-              if p.resolve() != dst.resolve():
-                 shutil.move(str(p), str(dst))
-                 moved += 1
-
-           csvs = [p for p in os.listdir('stock_data_400') if p.lower().endswith('.csv')]
-           print("Unzipped CSVs:", len(csvs), "(moved:", moved, ")")
+          if [ -f stock_data_400.zip ]; then
+            rm -rf stock_data_400
+            mkdir -p stock_data_400
+            unzip -q -o stock_data_400.zip -d stock_data_400
+            # move any nested CSVs up to the root folder
+            find stock_data_400 -type f -name '*.csv' ! -path 'stock_data_400/*' -exec mv -f {} stock_data_400/ \; || true
+            # clean empty dirs
+            find stock_data_400 -type d -mindepth 1 -empty -delete || true
+            echo "Unzipped CSV count:" $(ls stock_data_400/*.csv 2>/dev/null | wc -l)
+          else
+            echo "No stock_data_400.zip found (nothing to unpack)."
+          fi
      
       - name: Generate equities-only universe (from dataset + exclude list)
         shell: python
