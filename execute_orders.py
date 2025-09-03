@@ -62,15 +62,22 @@ def alpaca_base(env: str) -> str:
 
 def place_alpaca_order(base: str, key: str, secret: str, payload: dict) -> dict:
     h = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": secret, "Content-Type": "application/json"}
-    r = requests.post(f"{base}/v2/orders", headers=h, data=json.dumps(payload), timeout=20)
-    # Don’t explode on 4xx — record it
+    r = requests.post(f"{base}/v2/orders", headers=h, json=payload, timeout=20)
+
+# Log broker error text (e.g., after-hours market order) but don't crash
+    if r.status_code >= 400:
+     print(f"Alpaca error {r.status_code}: {r.text[:500]}")
+
     try:
-        j = r.json()
+      j = r.json()
     except Exception:
-        j = {"error": f"Non-JSON response status {r.status_code}"}
+       # Non-JSON (e.g., HTML error page) — include a stub of the body to help debug
+      j = {"error": f"Non-JSON response status {r.status_code}", "body": r.text[:500]}
+
     if r.status_code >= 300:
-        j.setdefault("error", f"HTTP {r.status_code}")
-    return j
+       j.setdefault("error", f"HTTP {r.status_code}")
+
+   return j
 
 def atr14_from_csv(data_dir, sym):
     p = (data_dir / f"{sym}.csv")
