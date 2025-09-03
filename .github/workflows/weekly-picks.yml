@@ -195,255 +195,7 @@ jobs:
 
            csvs = [p for p in os.listdir('stock_data_400') if p.lower().endswith('.csv')]
            print("Unzipped CSVs:", len(csvs), "(moved:", moved, ")")
-
-      - name: Gate to U.S. open (Alpaca clock, max 2h sleep)
-        if: ${{ (github.event_name == 'schedule' &&
-                  (github.event.schedule == '28 13 * * 1-5' ||
-                   github.event.schedule == '28 14 * * 1-5')) ||
-                (github.event_name == 'workflow_dispatch' && inputs.run_open == true) }}
-        env:
-          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
-          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
-          ALPACA_ENV:    paper
-        shell: python
-        run: |
-          import os, time, sys, requests, datetime as dt
-
-          key = os.getenv("ALPACA_KEY"); sec = os.getenv("ALPACA_SECRET")
-          env = os.getenv("ALPACA_ENV","paper")
-          base = "https://paper-api.alpaca.markets" if env.startswith("paper") else "https://api.alpaca.markets"
-
-          if not key or not sec:
-              print("ERROR: missing ALPACA_KEY / ALPACA_SECRET (repo Settings → Secrets and variables → Actions).")
-              sys.exit(1)
-
-          h = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": sec}
-          r = requests.get(f"{base}/v2/clock", headers=h, timeout=20)
-          print("Clock status:", r.status_code)
-          ctype = r.headers.get("content-type","")
-          if "application/json" not in ctype:
-              print("Clock body (first 400 chars):\n", r.text[:400])
-              r.raise_for_status()
-
-          clk = r.json()
-          print("Clock JSON:", clk)
-
-          if not clk.get("is_open"):
-              next_open = dt.datetime.fromisoformat(clk["next_open"].replace("Z","+00:00"))
-              now = dt.datetime.now(dt.timezone.utc)
-              wait = (next_open - now).total_seconds()
-              print(f"Now(UTC)={now}  next_open={next_open}  wait_sec={int(wait)}")
-
-              # sleep only if the open is within 2h; otherwise exit neutral
-              if 0 < wait <= 7200:
-                  time.sleep(int(wait))
-              elif wait > 7200:
-                  print("Open more than 2h away — exiting neutral.")
-                  sys.exit(78)
-
-          print("Market open — continuing.")
-
-      - name: Execute exits at open (if any)
-        if: ${{ (github.event_name == 'schedule' &&
-                  (github.event.schedule == '28 13 * * 1-5' ||
-                   github.event.schedule == '28 14 * * 1-5')) ||
-                (github.event_name == 'workflow_dispatch' && inputs.run_open == true) }}
-        env:
-          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
-          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
-          ALPACA_ENV:    paper
-        shell: bash
-        run: |
-          if [ -s backtests/exit_symbols.txt ]; then
-            echo "Selling: $(tr '\n' ',' < backtests/exit_symbols.txt)"
-            python execute_orders.py \
-              --broker alpaca \
-              --data-dir stock_data_400 \
-              --picklist backtests/picklist_highrsi_trend.csv \
-              --week "${WEEK:-${{ steps.when.outputs.friday }}}" \
-              --topk "${{ env.TOPK }}" \
-              --side sell \
-              --symbols-file backtests/exit_symbols.txt
-          else
-            echo "No exits today."
-          fi
-
-      - name: Decide if today is first session after last Friday (and log)
-        if: ${{ (github.event_name == 'schedule' &&
-                  (github.event.schedule == '28 13 * * 1-5' ||
-                   github.event.schedule == '28 14 * * 1-5')) ||
-                (github.event_name == 'workflow_dispatch' && inputs.run_open == true) }}
-        id: buygate
-        env:
-          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
-          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
-          ALPACA_ENV:    paper
-        shell: python
-        run: |
-          import os,requests,datetime as dt
-          from zoneinfo import ZoneInfo
-
-          base = "https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
-          k = os.getenv("ALPACA_KEY"); s = os.getenv("ALPACA_SECRET")
-          assert k and s, f"Missing Alpaca secrets: key={'set' if k else 'MISSING'}, secret={'set' if s else 'MISSING'}"
-          h = {"APCA-API-KEY-ID": k, "APCA-API-SECRET-KEY": s}
-
-          friday = "${{ steps.when.outputs.friday }}"
-          start  = (dt.date.fromisoformat(friday) + dt.timedelta(days=1)).isoformat()
-          end    = (dt.date.fromisoformat(friday) + dt.timedelta(days=7)).isoformat()
-
-          r = requests.get(f"{base}/v2/calendar", params={"start": start, "end": end}, headers=h, timeout=20)
-          print("Calendar status:", r.status_code)
-          try:
-              cal = r.json()
-          except Exception:
-              print("Calendar body (first 500 chars):\n", r.text[:500])
-              raise
-
-          first = (cal[0]["date"] if cal else None)
-          today_ny = dt.datetime.now(dt.timezone.utc).astimezone(ZoneInfo("America/New_York")).date().isoformat()
-          do = "1" if first and today_ny == first else "0"
-          print(f"First session after {friday}: {first} | Today: {today_ny} | BUY={do}")
-          open(os.environ["GITHUB_OUTPUT"], "a").write(f"do={do}\n")
      
-      
-      - name: Upload first session log
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: first-session-${{ steps.when.outputs.friday }}
-          path: backtests/first_session_log.json
-
-      - name: Ensure picklist exists (build if missing)
-        run: |
-          mkdir -p backtests
-          if [ ! -f backtests/picklist_highrsi_trend.csv ]; then
-            echo "Picklist missing — building it now…"
-            python build_picklist_parametric.py \
-              --data-dir stock_data_400 \
-              --rsi-min 68 \
-              --max-ext20 0.15 \
-              --top-per-week 40 \
-              --until "${UNTIL}" \
-              --out backtests/picklist_highrsi_trend.csv
-             ls -lh backtests/picklist_highrsi_trend.csv
-           else
-             echo "Picklist already present:"
-             ls -lh backtests/picklist_highrsi_trend.csv
-           fi
-
-      - name: Debug — inspect picklist before buys
-        shell: python
-        run: |
-          import pathlib, pandas as pd, sys
-          p = pathlib.Path("backtests/picklist_highrsi_trend.csv")
-          if not p.exists():
-              print("ERROR: missing", p); sys.exit(1)
-          df = pd.read_csv(p)
-          print("Picklist rows:", len(df), "columns:", list(df.columns))
-          print(df.head(12).to_string(index=False))
-          if df.empty:
-              print("Picklist is empty — aborting buys.")
-              sys.exit(78)
-
-      - name: Prepare buy list from picklist (robust week select)
-        shell: python
-        run: |
-          import os, sys, pandas as pd, pathlib
-          path = pathlib.Path("backtests/picklist_highrsi_trend.csv")
-          df = pd.read_csv(path)
-
-          # pick the week column
-          col = "week_start" if "week_start" in df.columns else ("week" if "week" in df.columns else None)
-          if not col:
-              print("ERROR: no week column in picklist. Columns:", list(df.columns)); sys.exit(1)
-
-          # parse dates and show what weeks exist
-          ser = pd.to_datetime(df[col], errors="coerce")
-          uniq = sorted(set(ser.dropna().dt.date))
-          print("Weeks present (last 8):", [d.isoformat() for d in uniq[-8:]])
-
-          # choose target week: prefer env WEEK (from the Derive step), else latest present
-          week = os.environ.get("WEEK") or (uniq[-1].isoformat() if uniq else None)
-          print("Chosen WEEK:", week)
-          if not week:
-              print("ERROR: no parsable weeks in picklist. Sample raw values:", df[col].dropna().astype(str).head(10).tolist())
-              sys.exit(1)
-
-          # select and sort (rank asc, score desc)
-          sel = df[ser.dt.date.astype(str) == week].copy()
-          if "rank" in sel.columns:
-              sel = sel.sort_values(["rank","score"], ascending=[True, False])
-          elif "score" in sel.columns:
-              sel = sel.sort_values("score", ascending=False)
-
-          topk = int(os.environ.get("TOPK", "6"))
-          picks = sel["symbol"].head(topk).dropna().astype(str).tolist()
-          print(f"WEEK={week} | candidates={len(sel)} | picks={picks}")
-
-          if not picks:
-              print("No picks for chosen WEEK — aborting buys."); sys.exit(78)
-          pathlib.Path("backtests").mkdir(parents=True, exist_ok=True)
-          open("backtests/buy_symbols.txt","w").write("\n".join(picks))
-
-      - name: Execute Monday buys (Top-K) with day-1 ATR stop
-        if: ${{ (
-                (github.event_name == 'schedule' &&
-                (github.event.schedule == '28 13 * * 1-5' ||
-                  github.event.schedule == '28 14 * * 1-5')) ||
-                (github.event_name == 'workflow_dispatch' && inputs.run_open == true)
-              ) && (
-                steps.buygate.outputs.do == '1' || inputs.force_buy == true
-              ) }}
-        env:
-          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
-          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
-          ALPACA_ENV:    paper
-          NOTIONAL_PER:  "5000"
-        shell: bash
-        run: |
-          WEEK_VAL="${WEEK:-${{ steps.when.outputs.monday }}}"
-          echo "Buying for WEEK=$WEEK_VAL using symbols from backtests/buy_symbols.txt"
-          python execute_orders.py \
-            --broker alpaca \
-            --data-dir stock_data_400 \
-            --picklist backtests/picklist_highrsi_trend.csv \
-            --week "$WEEK_VAL" \
-            --side buy \
-            --notional "${NOTIONAL_PER}" \
-            --init-stop-atr-mult 1.75 \
-            --symbols-file backtests/buy_symbols.txt
-      
-      - name: Upload order log
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: orders-${{ steps.when.outputs.friday }}
-          path: backtests/orders_*.json
-
-      
-
-      - name: Slack — Open recap (only if orders)
-        if: ${{ always() }}
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-        shell: bash
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          if [[ -z "${SLACK_WEBHOOK_URL:-}" ]]; then echo "Slack not configured; skipping."; exit 0; fi
-          sudo apt-get update -y >/dev/null && sudo apt-get install -y jq >/dev/null
-          files=$(find backtests -maxdepth 1 -type f -name 'orders_*.json' -mmin -360 2>/dev/null || true)
-          if [[ -z "$files" ]]; then echo "No recent orders; skipping."; exit 0; fi
-          lines=$(jq -r '(if type=="array" then .[] else . end)|[.symbol//.asset_symbol//"?",(.side//"?")|ascii_upcase, (.qty//.filled_qty//"-"),(.filled_avg_price//.limit_price//.stop_price//"-"),(.status//"?")]|@tsv' $files \
-           | awk '{printf "%s %s qty=%s px=%s status=%s\n",$2,$1,$3,$4,$5}')
-          if [[ -z "$lines" ]]; then echo "Parsed nothing; skipping."; exit 0; fi
-          payload=$(jq -Rn --arg t "*Intraweek Bot — Open recap*\n```$lines```" '{text:$t}')
-          curl -fsS -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL" >/dev/null && echo "Slack message sent."
-
-      
-      
-
       - name: Generate equities-only universe (from dataset + exclude list)
         shell: python
         run: |
@@ -653,6 +405,19 @@ jobs:
           wdf.to_csv(out, index=False)
           print(f'\nSaved full latest-week table to {out}')
 
+      - name: Derive WEEK from picklist (compact)
+        shell: python
+        run: |
+          import os, sys, pandas as pd
+          path='backtests/picklist_highrsi_trend.csv'; df=pd.read_csv(path)
+          if df.empty: print('ERROR: picklist is empty'); sys.exit(1)
+          col='week_start' if 'week_start' in df.columns else ('week' if 'week' in df.columns else None)
+          if not col: print('ERROR: no week column found'); sys.exit(1)
+          dates=pd.to_datetime(df[col], errors='coerce').dropna().dt.date
+          if dates.empty: print('ERROR: no parsable dates in', col); sys.exit(1)
+          week=max(dates.unique()); print('Chosen WEEK:', week)
+          open(os.environ['GITHUB_ENV'],'a').write(f'WEEK={week}\n')
+
       - name: Compute trailing stops (ratcheting, ATR 14 × 1.75) and write report
         shell: bash
         run: |
@@ -678,22 +443,7 @@ jobs:
             backtests/positions.json
             backtests/stops.csv
             backtests/trailing_report.txt
-
-      - name: Slack — Exits queued (only if any)
-        if: ${{ github.event_name == 'schedule' && (github.event.schedule == '15 20 * * 1-4' || github.event.schedule == '15 21 * * 1-4' || github.event.schedule == '15 20 * * 5' || github.event.schedule == '15 21 * * 5') }}
-        env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-        shell: bash
-        continue-on-error: true
-        run: |
-          set -euo pipefail
-          if [[ -z "${SLACK_WEBHOOK_URL:-}" ]]; then echo "Slack not configured; skipping."; exit 0; fi
-          if [[ ! -s backtests/exit_symbols.txt ]]; then echo "No exits queued; skipping."; exit 0; fi
-          sudo apt-get update -y >/dev/null && sudo apt-get install -y jq >/dev/null
-          syms=$(tr '\n' ' ' < backtests/exit_symbols.txt | sed 's/[[:space:]]\+/ /g; s/^ *//; s/ *$//')
-          payload=$(jq -Rn --arg t "*Intraweek Bot — Exits queued for next open*\n\`\`\`$syms\`\`\`" '{text:$t}')
-          curl -fsS -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL" >/dev/null && echo "Slack message sent."
-
+      
       - name: Upload latest-week debug CSV
         if: always()
         uses: actions/upload-artifact@v4
@@ -701,19 +451,6 @@ jobs:
           name: latest-week-debug-${{ steps.when.outputs.friday }}
           path: backtests/latest_week_debug.csv
           retention-days: 7
-      
-      - name: Derive WEEK from picklist (compact)
-        shell: python
-        run: |
-          import os, sys, pandas as pd
-          path='backtests/picklist_highrsi_trend.csv'; df=pd.read_csv(path)
-          if df.empty: print('ERROR: picklist is empty'); sys.exit(1)
-          col='week_start' if 'week_start' in df.columns else ('week' if 'week' in df.columns else None)
-          if not col: print('ERROR: no week column found'); sys.exit(1)
-          dates=pd.to_datetime(df[col], errors='coerce').dropna().dt.date
-          if dates.empty: print('ERROR: no parsable dates in', col); sys.exit(1)
-          week=max(dates.unique()); print('Chosen WEEK:', week)
-          open(os.environ['GITHUB_ENV'],'a').write(f'WEEK={week}\n')
       
       - name: Check picklist (exists + head)
         run: |
@@ -813,3 +550,254 @@ jobs:
             --picklist backtests/picklist_highrsi_trend.csv \
             --topk ${{ inputs.topk != '' && inputs.topk || '6' }} \
             --week "${WEEK}"
+
+      - name: Gate to U.S. open (Alpaca clock, max 2h sleep)
+        if: ${{ (github.event_name == 'schedule' &&
+                  (github.event.schedule == '28 13 * * 1-5' ||
+                   github.event.schedule == '28 14 * * 1-5')) ||
+                (github.event_name == 'workflow_dispatch' && inputs.run_open == true) }}
+        env:
+          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          ALPACA_ENV:    paper
+        shell: python
+        run: |
+          import os, time, sys, requests, datetime as dt
+
+          key = os.getenv("ALPACA_KEY"); sec = os.getenv("ALPACA_SECRET")
+          env = os.getenv("ALPACA_ENV","paper")
+          base = "https://paper-api.alpaca.markets" if env.startswith("paper") else "https://api.alpaca.markets"
+
+          if not key or not sec:
+              print("ERROR: missing ALPACA_KEY / ALPACA_SECRET (repo Settings → Secrets and variables → Actions).")
+              sys.exit(1)
+
+          h = {"APCA-API-KEY-ID": key, "APCA-API-SECRET-KEY": sec}
+          r = requests.get(f"{base}/v2/clock", headers=h, timeout=20)
+          print("Clock status:", r.status_code)
+          ctype = r.headers.get("content-type","")
+          if "application/json" not in ctype:
+              print("Clock body (first 400 chars):\n", r.text[:400])
+              r.raise_for_status()
+
+          clk = r.json()
+          print("Clock JSON:", clk)
+
+          if not clk.get("is_open"):
+              next_open = dt.datetime.fromisoformat(clk["next_open"].replace("Z","+00:00"))
+              now = dt.datetime.now(dt.timezone.utc)
+              wait = (next_open - now).total_seconds()
+              print(f"Now(UTC)={now}  next_open={next_open}  wait_sec={int(wait)}")
+
+              # sleep only if the open is within 2h; otherwise exit neutral
+              if 0 < wait <= 7200:
+                  time.sleep(int(wait))
+              elif wait > 7200:
+                  print("Open more than 2h away — exiting neutral.")
+                  sys.exit(78)
+
+          print("Market open — continuing.")
+
+      - name: Execute exits at open (if any)
+        if: ${{ (github.event_name == 'schedule' &&
+                  (github.event.schedule == '28 13 * * 1-5' ||
+                   github.event.schedule == '28 14 * * 1-5')) ||
+                (github.event_name == 'workflow_dispatch' && inputs.run_open == true) }}
+        env:
+          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          ALPACA_ENV:    paper
+        shell: bash
+        run: |
+          if [ -s backtests/exit_symbols.txt ]; then
+            echo "Selling: $(tr '\n' ',' < backtests/exit_symbols.txt)"
+            python execute_orders.py \
+              --broker alpaca \
+              --data-dir stock_data_400 \
+              --picklist backtests/picklist_highrsi_trend.csv \
+              --week "${WEEK:-${{ steps.when.outputs.friday }}}" \
+              --topk "${{ env.TOPK }}" \
+              --side sell \
+              --symbols-file backtests/exit_symbols.txt
+          else
+            echo "No exits today."
+          fi
+
+      - name: Decide if today is first session after last Friday (and log)
+        if: ${{ (github.event_name == 'schedule' &&
+                  (github.event.schedule == '28 13 * * 1-5' ||
+                   github.event.schedule == '28 14 * * 1-5')) ||
+                (github.event_name == 'workflow_dispatch' && inputs.run_open == true) }}
+        id: buygate
+        env:
+          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          ALPACA_ENV:    paper
+        shell: python
+        run: |
+          import os,requests,datetime as dt
+          from zoneinfo import ZoneInfo
+
+          base = "https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
+          k = os.getenv("ALPACA_KEY"); s = os.getenv("ALPACA_SECRET")
+          assert k and s, f"Missing Alpaca secrets: key={'set' if k else 'MISSING'}, secret={'set' if s else 'MISSING'}"
+          h = {"APCA-API-KEY-ID": k, "APCA-API-SECRET-KEY": s}
+
+          friday = "${{ steps.when.outputs.friday }}"
+          start  = (dt.date.fromisoformat(friday) + dt.timedelta(days=1)).isoformat()
+          end    = (dt.date.fromisoformat(friday) + dt.timedelta(days=7)).isoformat()
+
+          r = requests.get(f"{base}/v2/calendar", params={"start": start, "end": end}, headers=h, timeout=20)
+          print("Calendar status:", r.status_code)
+          try:
+              cal = r.json()
+          except Exception:
+              print("Calendar body (first 500 chars):\n", r.text[:500])
+              raise
+
+          first = (cal[0]["date"] if cal else None)
+          today_ny = dt.datetime.now(dt.timezone.utc).astimezone(ZoneInfo("America/New_York")).date().isoformat()
+          do = "1" if first and today_ny == first else "0"
+          print(f"First session after {friday}: {first} | Today: {today_ny} | BUY={do}")
+          open(os.environ["GITHUB_OUTPUT"], "a").write(f"do={do}\n")
+
+      - name: Debug — inspect picklist before buys
+        shell: python
+        run: |
+          import pathlib, pandas as pd, sys
+          p = pathlib.Path("backtests/picklist_highrsi_trend.csv")
+          if not p.exists():
+              print("ERROR: missing", p); sys.exit(1)
+          df = pd.read_csv(p)
+          print("Picklist rows:", len(df), "columns:", list(df.columns))
+          print(df.head(12).to_string(index=False))
+          if df.empty:
+              print("Picklist is empty — aborting buys.")
+              sys.exit(78)
+
+      - name: Ensure picklist exists (build if missing)
+        run: |
+          mkdir -p backtests
+          if [ ! -f backtests/picklist_highrsi_trend.csv ]; then
+            echo "Picklist missing — building it now…"
+            python build_picklist_parametric.py \
+              --data-dir stock_data_400 \
+              --rsi-min 68 \
+              --max-ext20 0.15 \
+              --top-per-week 40 \
+              --until "${UNTIL}" \
+              --out backtests/picklist_highrsi_trend.csv
+             ls -lh backtests/picklist_highrsi_trend.csv
+           else
+             echo "Picklist already present:"
+             ls -lh backtests/picklist_highrsi_trend.csv
+           fi
+
+     
+      - name: Prepare buy list from picklist (robust week select)
+        shell: python
+        run: |
+          import os, sys, pandas as pd, pathlib
+          path = pathlib.Path("backtests/picklist_highrsi_trend.csv")
+          df = pd.read_csv(path)
+
+          # pick the week column
+          col = "week_start" if "week_start" in df.columns else ("week" if "week" in df.columns else None)
+          if not col:
+              print("ERROR: no week column in picklist. Columns:", list(df.columns)); sys.exit(1)
+
+          # parse dates and show what weeks exist
+          ser = pd.to_datetime(df[col], errors="coerce")
+          uniq = sorted(set(ser.dropna().dt.date))
+          print("Weeks present (last 8):", [d.isoformat() for d in uniq[-8:]])
+
+          # choose target week: prefer env WEEK (from the Derive step), else latest present
+          week = os.environ.get("WEEK") or (uniq[-1].isoformat() if uniq else None)
+          print("Chosen WEEK:", week)
+          if not week:
+              print("ERROR: no parsable weeks in picklist. Sample raw values:", df[col].dropna().astype(str).head(10).tolist())
+              sys.exit(1)
+
+          # select and sort (rank asc, score desc)
+          sel = df[ser.dt.date.astype(str) == week].copy()
+          if "rank" in sel.columns:
+              sel = sel.sort_values(["rank","score"], ascending=[True, False])
+          elif "score" in sel.columns:
+              sel = sel.sort_values("score", ascending=False)
+
+          topk = int(os.environ.get("TOPK", "6"))
+          picks = sel["symbol"].head(topk).dropna().astype(str).tolist()
+          print(f"WEEK={week} | candidates={len(sel)} | picks={picks}")
+
+          if not picks:
+              print("No picks for chosen WEEK — aborting buys."); sys.exit(78)
+          pathlib.Path("backtests").mkdir(parents=True, exist_ok=True)
+          open("backtests/buy_symbols.txt","w").write("\n".join(picks))
+
+      - name: Execute Monday buys (Top-K) with day-1 ATR stop
+        if: ${{ (
+                (github.event_name == 'schedule' &&
+                (github.event.schedule == '28 13 * * 1-5' ||
+                  github.event.schedule == '28 14 * * 1-5')) ||
+                (github.event_name == 'workflow_dispatch' && inputs.run_open == true)
+              ) && (
+                steps.buygate.outputs.do == '1' || inputs.force_buy == true
+              ) }}
+        env:
+          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          ALPACA_ENV:    paper
+          NOTIONAL_PER:  "5000"
+        shell: bash
+        run: |
+          WEEK_VAL="${WEEK:-${{ steps.when.outputs.monday }}}"
+          echo "Buying for WEEK=$WEEK_VAL using symbols from backtests/buy_symbols.txt"
+          python execute_orders.py \
+            --broker alpaca \
+            --data-dir stock_data_400 \
+            --picklist backtests/picklist_highrsi_trend.csv \
+            --week "$WEEK_VAL" \
+            --side buy \
+            --notional "${NOTIONAL_PER}" \
+            --init-stop-atr-mult 1.75 \
+            --symbols-file backtests/buy_symbols.txt
+      
+      - name: Upload order log
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: orders-${{ steps.when.outputs.friday }}
+          path: backtests/orders_*.json
+
+      - name: Slack — Open recap (only if orders)
+        if: ${{ always() }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          if [[ -z "${SLACK_WEBHOOK_URL:-}" ]]; then echo "Slack not configured; skipping."; exit 0; fi
+          sudo apt-get update -y >/dev/null && sudo apt-get install -y jq >/dev/null
+          files=$(find backtests -maxdepth 1 -type f -name 'orders_*.json' -mmin -360 2>/dev/null || true)
+          if [[ -z "$files" ]]; then echo "No recent orders; skipping."; exit 0; fi
+          lines=$(jq -r '(if type=="array" then .[] else . end)|[.symbol//.asset_symbol//"?",(.side//"?")|ascii_upcase, (.qty//.filled_qty//"-"),(.filled_avg_price//.limit_price//.stop_price//"-"),(.status//"?")]|@tsv' $files \
+           | awk '{printf "%s %s qty=%s px=%s status=%s\n",$2,$1,$3,$4,$5}')
+          if [[ -z "$lines" ]]; then echo "Parsed nothing; skipping."; exit 0; fi
+          payload=$(jq -Rn --arg t "*Intraweek Bot — Open recap*\n```$lines```" '{text:$t}')
+          curl -fsS -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL" >/dev/null && echo "Slack message sent."
+
+      - name: Slack — Exits queued (only if any)
+        if: ${{ github.event_name == 'schedule' && (github.event.schedule == '15 20 * * 1-4' || github.event.schedule == '15 21 * * 1-4' || github.event.schedule == '15 20 * * 5' || github.event.schedule == '15 21 * * 5') }}
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        shell: bash
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          if [[ -z "${SLACK_WEBHOOK_URL:-}" ]]; then echo "Slack not configured; skipping."; exit 0; fi
+          if [[ ! -s backtests/exit_symbols.txt ]]; then echo "No exits queued; skipping."; exit 0; fi
+          sudo apt-get update -y >/dev/null && sudo apt-get install -y jq >/dev/null
+          syms=$(tr '\n' ' ' < backtests/exit_symbols.txt | sed 's/[[:space:]]\+/ /g; s/^ *//; s/ *$//')
+          payload=$(jq -Rn --arg t "*Intraweek Bot — Exits queued for next open*\n\`\`\`$syms\`\`\`" '{text:$t}')
+          curl -fsS -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL" >/dev/null && echo "Slack message sent."
