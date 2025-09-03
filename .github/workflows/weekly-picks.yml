@@ -578,21 +578,19 @@ jobs:
       - name: Execute exits at open (if any)
         if: ${{ steps.gate.outputs.go == '1' }}
         env:
-          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}      # or your *_API_KEY_ID
-          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}   # or your *_API_SECRET_KEY
+          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
           ALPACA_ENV:    paper
         shell: bash
         run: |
           if [ -s backtests/exit_symbols.txt ]; then
-            echo "Selling: $(tr '\n' ',' < backtests/exit_symbols.txt)"
+            echo "Exit list present (backtests/exit_symbols.txt). Triggering sell logic."
             python execute_orders.py \
               --broker alpaca \
               --data-dir stock_data_400 \
               --picklist backtests/picklist_highrsi_trend.csv \
               --week "${WEEK:-${{ steps.when.outputs.friday }}}" \
-              --topk "${{ env.TOPK }}" \
-              --side sell \
-              --symbols-file backtests/exit_symbols.txt
+              --side sell
           else
             echo "No exits today."
           fi
@@ -713,23 +711,23 @@ jobs:
       - name: Execute Monday buys (Top-K) with day-1 ATR stop
         if: ${{ steps.gate.outputs.go == '1' && (steps.buygate.outputs.do == '1' || inputs.force_buy == true) }}
         env:
-          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
-          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}      # or your *_API_KEY_ID
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}   # or your *_API_SECRET_KEY
           ALPACA_ENV:    paper
           NOTIONAL_PER:  "5000"
         shell: bash
         run: |
           WEEK_VAL="${WEEK:-${{ steps.when.outputs.monday }}}"
-          echo "Buying for WEEK=$WEEK_VAL using symbols from backtests/buy_symbols.txt"
+          echo "Buying for WEEK=$WEEK_VAL (TOPK=${{ env.TOPK }}) from picklist_highrsi_trend.csv"
           python execute_orders.py \
             --broker alpaca \
             --data-dir stock_data_400 \
             --picklist backtests/picklist_highrsi_trend.csv \
             --week "$WEEK_VAL" \
+            --topk "${{ env.TOPK }}" \
             --side buy \
             --notional "${NOTIONAL_PER}" \
-            --init-stop-atr-mult 1.75 \
-            --symbols-file backtests/buy_symbols.txt
+            --init-stop-atr-mult 1.75
       
       - name: Upload order log
         if: ${{ always() }}
