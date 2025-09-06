@@ -876,12 +876,22 @@ jobs:
         if: always()
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          ORDERS_PATH: backtests/orders_*.json   # <-- change if your path is different
         run: |
           set -euo pipefail
 
-          # 1) Normalize whatever is in ORDERS_PATH into an array of order objects.
-          #    Handles: object with .orders, raw array, or a *string* that contains JSON.
+          # --- locate latest orders file, or skip cleanly ---
+          shopt -s nullglob
+          files=(backtests/orders_*.json)   # <-- change folder/prefix if yours differs
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No orders file found; skipping Slack."
+            exit 0
+          fi
+          # newest first
+          IFS=$'\n' files=($(ls -1t "${files[@]}"))
+          ORDERS="${files[0]}"
+          echo "Using ORDERS=$ORDERS"
+
+          # --- normalize JSON to an array of objects ---
           jq -c '
             def norm:
               (if type=="string" then (try fromjson catch .) else . end)
@@ -889,24 +899,23 @@ jobs:
               | (if type=="array" then . else [] end)
               | map(select(type=="object"));
             norm
-          ' "$ORDERS_PATH" > orders.norm.json
+          ' "$ORDERS" > orders.norm.json
 
-          # 2) If no orders, skip Slack nicely.
-          count=$(jq 'length' orders.norm.json)
-          echo "orders: $count"
-          if [ "$count" -eq 0 ]; then
-            echo "No orders; skipping Slack."
+          cnt=$(jq 'length' orders.norm.json)
+          echo "orders: $cnt"
+          if [ "$cnt" -eq 0 ]; then
+            echo "No orders in file; skipping Slack."
             exit 0
           fi
-
-          # 3) Build a simple recap line for each order and send to Slack.
-          #    If your fields differ, adjust symbol/side/qty/price below.
+ 
+          # --- build recap text and post to Slack ---
+          # adjust field names here if your JSON uses different ones
           recap=$(jq -r '.[] | "- \(.symbol) \(.side) x \(.qty) @ \(.price)"' orders.norm.json | sed ':a;N;$!ba;s/\n/\\n/g')
 
           curl -sS -X POST -H 'Content-type: application/json' \
             --data "{\"text\":\"Open recap (only if orders):\\n${recap}\"}" \
             "$SLACK_WEBHOOK_URL"
-
+      
       - name: Slack — Exits queued (only if any)
         if: ${{ github.event_name == 'schedule' && (github.event.schedule == '15 20 * * 1-4' || github.event.schedule == '15 21 * * 1-4' || github.event.schedule == '15 20 * * 5' || github.event.schedule == '15 21 * * 5') }}
         env:
