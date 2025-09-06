@@ -431,87 +431,114 @@ jobs:
             --atr-mult 1.75
 
       - name: Apply trailing stops to Alpaca (tighten only)
-        # use the same if: as your "Trailing stops after close" step, e.g.:
-        # if: ${{ github.event_name == 'schedule' && (github.event.schedule == '15 20 * * 1-4' || github.event.schedule == '15 21 * * 1-4' || github.event.schedule == '15 20 * * 5' || github.event.schedule == '15 21 * * 5') }}
+        if: ${{ github.event_name == 'schedule' && (github.event.schedule == '28 13 * * 1-5' || github.event.schedule == '28 14 * * 1-5') }}
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
           ALPACA_ENV:    paper
-        shell: bash
+        shell: python
         run: |
-          python - <<'PY'
-          import os, json, requests, pandas as pd
+          import os, sys, json, requests, pandas as pd
+
+          # Skip cleanly if keys are missing
+          if not os.getenv("ALPACA_KEY") or not os.getenv("ALPACA_SECRET"):
+              print("Alpaca not configured; skipping."); sys.exit(0)
 
           base = "https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
-          h = {
-            "APCA-API-KEY-ID": os.environ["ALPACA_KEY"],
-            "APCA-API-SECRET-KEY": os.environ["ALPACA_SECRET"],
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-          }
+          H = {"APCA-API-KEY-ID": os.environ["ALPACA_KEY"], "APCA-API-SECRET-KEY": os.environ["ALPACA_SECRET"]}
 
-          # 1) Read desired stops (expects columns: symbol and stop/new_stop)
-          path = "backtests/stops.csv"
+          # Load the trailing targets produced earlier (trailing_stops.py)
+          csv_path = "backtests/stops.csv"
           try:
-            df = pd.read_csv(path)
-          except FileNotFoundError:
-            print("No stops.csv — nothing to do."); raise SystemExit(0)
+              df = pd.read_csv(csv_path)
+          except Exception as e:
+              print(f"No stops.csv ({e}); nothing to do."); sys.exit(0)
 
-          stopcol = "stop" if "stop" in df.columns else ("new_stop" if "new_stop" in df.columns else None)
-          if stopcol is None or "symbol" not in df.columns:
-            print("stops.csv missing columns (need symbol + stop/new_stop) — skipping."); raise SystemExit(0)
+          # Normalize column names
+          cols = {c.lower(): c for c in df.columns}
+          sym = cols.get("symbol")
+          stop = cols.get("new_stop") or cols.get("stop") or cols.get("stop_price")
+          side = cols.get("side")
+          if not sym or not stop:
+              print("stops.csv missing symbol/stop columns; columns:", df.columns.tolist())
+              sys.exit(0)
 
-          desired = {str(r["symbol"]).strip(): float(r[stopcol]) for _,r in df.iterrows() if pd.notna(r.get(stopcol))}
+          df = df[[sym, stop] + ([side] if side else [])].copy()
+          df.columns = ["symbol", "new_stop"] + (["side"] if side else [])
 
-          if not desired:
-            print("No stop values found — nothing to do."); raise SystemExit(0)
+          # Current positions
+          r = requests.get(f"{base}/v2/positions", headers=H, timeout=20)
+          if r.status_code != 200:
+              print("positions error", r.status_code, r.text); sys.exit(0)
+          positions = {p["symbol"]: p for p in r.json()}
 
-          # 2) Fetch current open stop orders
-          open_orders = requests.get(f"{base}/v2/orders", params={"status":"open","limit":500},
-                                     headers=h, timeout=20).json()
-          current = {}
-          for o in open_orders:
-            if o.get("order_type") == "stop" and o.get("symbol"):
+          # Open stop orders (to compare / cancel)
+          o = requests.get(f"{base}/v2/orders", params={"status":"open","limit":500}, headers=H, timeout=20)
+          open_orders = o.json() if o.status_code == 200 else []
+          stops_by_sym = {}
+          for od in open_orders:
+              if od.get("type") in ("stop","stop_limit") and od.get("symbol"):
+                  stops_by_sym.setdefault(od["symbol"], []).append(od)
+
+          def tighter(curr, new, side):
+              if curr is None: return True
+              if side == "long":  return new > curr
+              if side == "short": return new < curr
+              return new > curr  # default treat as long
+
+          changed = 0
+
+          for _, row in df.iterrows():
+              sym = str(row["symbol"]).strip().upper()
+              if sym not in positions:
+                  continue
+
+              qty = abs(float(positions[sym].get("qty", "0") or 0))
+              if qty == 0:
+                  continue
+
+              side_row = (row.get("side") or "").lower()
+              if not side_row:
+                  side_row = "long" if float(positions[sym].get("qty", "0") or 0) > 0 else "short"
+
               try:
-                current[o["symbol"]] = {"id": o["id"], "stop": float(o.get("stop_price") or 0)}
+                  new_stop = float(row["new_stop"])
               except Exception:
-                pass
+                  continue
 
-          # 3) Tighten only (raise stop for long positions)
-          tightened = 0
-          for sym, new_stop in desired.items():
-            cur = current.get(sym)
-            if not cur:            # no existing stop order -> skip (tighten only)
-              continue
-            if new_stop <= (cur["stop"] or 0) + 1e-6:
-              continue             # not tighter
+              # current stop (if any)
+              curr_stop = None
+              curr_id = None
+              for od in stops_by_sym.get(sym, []):
+                  sp = od.get("stop_price") or od.get("limit_price")
+                  try:
+                      curr_stop = float(sp); curr_id = od.get("id"); break
+                  except Exception:
+                      pass
 
-            print(f"{sym}: {cur['stop']} -> {new_stop} (cancel + replace)")
-            # cancel old
-            requests.delete(f"{base}/v2/orders/{cur['id']}", headers=h, timeout=20)
+              if not tighter(curr_stop, new_stop, side_row):
+                  continue
 
-            # fetch position to get qty
-            pos = requests.get(f"{base}/v2/positions/{sym}", headers=h, timeout=20)
-             if pos.status_code != 200:
-              print(f"  ! no position for {sym}; skipping"); continue
-            qty = pos.json().get("qty")
-            if not qty:
-              print(f"  ! missing qty for {sym}; skipping"); continue
+              # cancel old stop
+              if curr_id:
+                  requests.delete(f"{base}/v2/orders/{curr_id}", headers=H, timeout=20)
 
-            payload = {
-              "symbol": sym,
-              "side": "sell",
-              "type": "stop",
-              "time_in_force": "day",
-              "stop_price": round(float(new_stop), 4),
-              "qty": qty
-            }
-            r = requests.post(f"{base}/v2/orders", headers=h, json=payload, timeout=20)
-            print("  → replace status:", r.status_code, r.text[:200])
-            tightened += 1
+              # place tighter stop (DAY)
+              order = {
+                  "symbol": sym,
+                  "qty": qty,
+                  "side": "sell" if side_row=="long" else "buy",
+                  "type": "stop",
+                  "time_in_force": "day",
+                  "stop_price": new_stop
+              }
+              rr = requests.post(f"{base}/v2/orders", headers=H, json=order, timeout=20)
+              if rr.status_code != 200:
+                  print("order error", sym, rr.status_code, rr.text)
+              else:
+                  changed += 1
 
-          print("Tightened:", tightened)
-          PY
+          print(f"Tightened stops placed: {changed}")
 
       - name: Upload trailing-stop artifacts
         uses: actions/upload-artifact@v4
