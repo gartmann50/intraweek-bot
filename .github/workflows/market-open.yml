@@ -18,6 +18,10 @@ concurrency:
 jobs:
   open:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions:  read   # <-- REQUIRED to download artifacts from other workflow runs
+    
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
