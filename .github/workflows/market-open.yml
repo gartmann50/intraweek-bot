@@ -188,12 +188,12 @@ jobs:
           | python - <<'PY'
            import sys, json
         try:
-          j = json.load(sys.stdin)
-          if isinstance(j, list) and j:
+           j = json.load(sys.stdin)
+           if isinstance(j, list) and j:
               print("Open positions:", [(p.get("symbol"), p.get("qty")) for p in j])
-       else:
-            print("Open positions: none")
-       except Exception as e:
+        else:
+              print("Open positions: none")
+        except Exception as e:
           print("Positions parse error:", e)
       PY
 
