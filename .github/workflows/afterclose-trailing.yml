@@ -52,6 +52,13 @@ jobs:
           path: backtests
           if_no_artifact_found: fail
 
+      - name: Sanity check picklist
+        run: |
+           echo "pwd=$(pwd)"
+           ls -lah backtests || true
+           test -s backtests/picklist_highrsi_trend.csv || { echo "No picklist file found; aborting trailing."; exit 78; }
+
+
       - name: Build trailing + exits
         run: |
           python trailing_stops.py \
