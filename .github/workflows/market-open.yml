@@ -45,28 +45,30 @@ jobs:
            GH_TOKEN: ${{ github.token }}
 
 
-      - name: Download artifacts (picks + trailing)
+      - name: Download weekly picks artifact
         uses: dawidd6/action-download-artifact@v2
         with:
-          workflow: friday-build.yml      # file in .github/workflows
-          branch: main                    # the branch where Friday build runs
-          event: schedule                 # only scheduled runs
+          workflow: friday-build.yml        # the workflow that creates the picklist
+          branch: main                      # adjust if you use another branch
+          # do NOT restrict to 'schedule' only; allow manual & scheduled
           workflow_conclusion: success
-          # pull the two artifacts produced by the Friday build:
-          name: weekly-picks-${{ steps.when.outputs.friday }}
+          name: ^weekly-picks-${{ steps.when.outputs.friday }}$
+          name_is_regexp: true              # exact regex match on the computed Friday
           path: backtests
           if_no_artifact_found: fail
+
 
       - name: Download trailing stops
         uses: dawidd6/action-download-artifact@v2
         with:
           workflow: friday-build.yml
           branch: main
-          event: schedule
           workflow_conclusion: success
-          name: trailing-stops-${{ steps.when.outputs.friday }}
+          name: ^trailing-stops-${{ steps.when.outputs.friday }}$
+          name_is_regexp: true
           path: backtests
           if_no_artifact_found: warn
+
 
       
       - name: Normalize picklist path
