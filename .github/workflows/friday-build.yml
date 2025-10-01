@@ -103,31 +103,70 @@ jobs:
 
       - name: Email weekly picks + 70D highs
         env:
-          SMTP_USER:  ${{ secrets.SMTP_USER }}
-          SMTP_PASS:  ${{ secrets.SMTP_PASS }}
-          SMTP_FROM:  ${{ secrets.SMTP_FROM }}
-          SMTP_TO:    ${{ secrets.SMTP_TO }}
+         SMTP_USER: ${{ secrets.SMTP_USER }}
+         SMTP_PASS: ${{ secrets.SMTP_PASS }}
+         SMTP_TO:   ${{ secrets.SMTP_TO }}
+         SMTP_FROM: ${{ secrets.SMTP_FROM }}
         run: |
           python - <<'PY'
-          import os, sys, re, yaml
-          cfg = yaml.safe_load(open('config_notify.yaml')) or {}
-          def split_list(x):
-              return [p.strip() for p in re.split(r'[;,]', str(x or '')) if p.strip()]
+          import os, sys, pathlib
+          import yaml, smtplib
+          from email.mime.text import MIMEText
+          from email.mime.multipart import MIMEMultipart
+          from email.mime.base import MIMEBase
+          from email import encoders
 
+          # ---- load config file (you write this earlier) and fall back to env ----
+          cfg = {}
+          p = pathlib.Path('config_notify.yaml')
+          if p.exists():
+              cfg = yaml.safe_load(p.read_text()) or {}
+          smtp_user = cfg.get('smtp_user') or os.getenv('SMTP_USER')
+          smtp_pass = cfg.get('smtp_pass') or os.getenv('SMTP_PASS')
+          smtp_to   = cfg.get('smtp_to')   or os.getenv('SMTP_TO')
           smtp_from = cfg.get('smtp_from') or cfg.get('from') or os.getenv('SMTP_FROM')
-          rcpts     = split_list(cfg.get('smtp_to') or cfg.get('to') or os.getenv('SMTP_TO'))
 
           if not smtp_from:
-              print('FATAL: smtp_from / from / SMTP_FROM is empty'); sys.exit(1)
-          if not rcpts:
-              print('FATAL: smtp_to / to / SMTP_TO is empty'); sys.exit(1)
+              print("FATAL: smtp_from / from / SMTP_FROM is empty")
+              sys.exit(1)
 
-          print('From:', smtp_from[:1] + '***')
-          print('Recipients:', len(rcpts))
+          host = cfg.get('host', 'smtp.gmail.com')
+          port = int(cfg.get('port', 587))
+          use_tls = bool(cfg.get('use_tls', True))
+
+          # ---- build message (weekly picks body + optional 70D digest/CSV) ----
+          subject = "Weekly picks + 70D highs"
+          body = ""
+          picks_preview = pathlib.Path('backtests/top6_preview.txt')
+          if picks_preview.exists():
+              body += picks_preview.read_text()
+          digest = pathlib.Path('backtests/hi70_digest.txt')
+          if digest.exists():
+              body += "\n\n" + digest.read_text()
+
+          msg = MIMEMultipart()
+          msg['From'] = smtp_from
+          msg['To']   = smtp_to
+          msg['Subject'] = subject
+          msg.attach(MIMEText(body or "(no content)", 'plain'))
+
+          attach_csv = pathlib.Path('backtests/hi70_thisweek.csv')
+          if attach_csv.exists():
+              part = MIMEBase('application', 'octet-stream')
+              part.set_payload(attach_csv.read_bytes())
+              encoders.encode_base64(part)
+              part.add_header('Content-Disposition', f'attachment; filename="{attach_csv.name}"')
+              msg.attach(part)
+
+          # ---- send ----
+          with smtplib.SMTP(host, port, timeout=30) as s:
+              if use_tls:
+                  s.starttls()
+              if smtp_user and smtp_pass:
+                  s.login(smtp_user, smtp_pass)
+              s.sendmail(smtp_from, [e.strip() for e in smtp_to.replace(';',',').split(',') if e.strip()], msg.as_string())
+          print("Email sent.")
           PY
-
-          # now send (your script reads config_notify.yaml)
-          python tools/email_combined.py
       
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
