@@ -49,6 +49,27 @@ jobs:
           name: ^(weekly-picks-|trailing-stops-).*
           path: backtests
           if_no_artifact_found: fail
+      
+      - name: Normalize picklist path
+        shell: bash
+        run: |
+           set -euo pipefail
+           shopt -s globstar nullglob
+           # find the file no matter which artifact folder it sits under
+           cand=(backtests/**/picklist_highrsi_trend.csv backtests/picklist_highrsi_trend.csv)
+           for f in "${cand[@]}"; do
+              if [[ -f "$f" ]]; then
+              cp -f "$f" backtests/picklist_highrsi_trend.csv
+              echo "Picklist copied from $f"
+              exit 0
+            fi
+           done
+           echo "ERROR: picklist_highrsi_trend.csv not found in downloaded artifacts"
+           exit 1
+
+      - name: Sanity — show backtests/
+        run: ls -Rlh backtests || true
+
       - name: Download trailing exits (if any)
         uses: dawidd6/action-download-artifact@v2
         with:
