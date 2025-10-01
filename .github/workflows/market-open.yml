@@ -150,29 +150,142 @@ jobs:
           p.Path('backtests').mkdir(exist_ok=True); open('backtests/buy_symbols.txt','w').write("\n".join(picks))
           print("picks:",picks)
           PY
+      
+      - name: Preflight Top-K before buying (why/why-not)
+        env:
+          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          ALPACA_ENV:    paper
+          NOTIONAL_PER:  "5000"                 # keep in sync with your buy step
+          TOPK:          ${{ env.TOPK || '6' }} # or hardcode "6"
+        shell: python
+        run: |
+          import os, sys, json, glob, pathlib, requests, pandas as pd
+          data_dir = "stock_data_400"
+          pick = pathlib.Path("backtests/picklist_highrsi_trend.csv")
+          if not pick.exists():
+              print("ERROR: picklist missing:", pick); sys.exit(78)
+
+          df = pd.read_csv(pick)
+          wkcol = "week_start" if "week_start" in df.columns else ("week" if "week" in df.columns else None)
+          if not wkcol:
+              print("ERROR: no week column in picklist"); sys.exit(1)
+
+          # WEEK from env (set earlier in your job) or latest in picklist:
+          week = os.environ.get("WEEK")
+          if not week:
+              week = str(pd.to_datetime(df[wkcol], errors="coerce").dropna().dt.date.max())
+          print("Chosen WEEK:", week)
+
+          # Top-K list for that week
+          k = int(os.getenv("TOPK", "6"))
+          sel = df[pd.to_datetime(df[wkcol], errors="coerce").dt.date.astype(str) == week].copy()
+          if "rank" in sel.columns: sel = sel.sort_values(["rank","symbol"], ascending=[True,True])
+          elif "score" in sel.columns: sel = sel.sort_values(["score","symbol"], ascending=[False,True])
+          picks = sel["symbol"].dropna().astype(str).head(k).tolist()
+          print("Top-K:", picks)
+          if not picks:
+              print("No picks for WEEK → nothing to buy."); sys.exit(0)
+
+          # Alpaca clock
+          base = "https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
+          H = {"APCA-API-KEY-ID": os.environ["ALPACA_KEY"], "APCA-API-SECRET-KEY": os.environ["ALPACA_SECRET"]}
+          r = requests.get(f"{base}/v2/clock", headers=H, timeout=20)
+          is_open = (r.status_code == 200 and (r.json() or {}).get("is_open", False))
+          print("Alpaca clock is_open:", is_open)
+
+          # helper: last close from your local EOD CSVs
+          def last_close(sym):
+              for p in sorted(glob.glob(f"{data_dir}/{sym}*.csv")):
+                  try:
+                      d = pd.read_csv(p, usecols=[0,4])  # Date, Close
+                      if len(d): return float(d.iloc[-1,1])
+                  except Exception:
+                      pass
+              return None
+
+          notional = float(os.getenv("NOTIONAL_PER","0") or 0)
+          print(f"Notional per name: {notional:,.2f} USD")
+
+          # asset checks
+          for s in picks:
+              a = requests.get(f"{base}/v2/assets/{s}", headers=H, timeout=20)
+              tradable, frac = False, False
+              if a.status_code == 200:
+                  aj = a.json() or {}
+                  tradable = bool(aj.get("tradable", False))
+                  frac     = bool(aj.get("fractionable", False))
+              lc = last_close(s)
+              reasons = []
+              if not tradable: reasons.append("NOT_TRADABLE")
+              if not frac and lc is not None and notional < lc: reasons.append(f"NOT_FRACTIONABLE & notional<{lc:.2f}")
+              if lc is None: reasons.append("NO_LOCAL_EOD")
+              if reasons:
+                  print(f"- {s}: SKIP → {', '.join(reasons)}")
+              else:
+                  print(f"- {s}: OK (tradable={tradable}, fractionable={frac}, last_close={lc})")
+
+          if not is_open:
+              print("NOTE: Market is closed; Alpaca will typically reject DAY market orders. Run this during open or gate to open.")
+
+      
       - name: Buy once (long-only)
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
           ALPACA_ENV:    paper
-          NOTIONAL_PER:  "5000"     # <-- set your per-position budget here
+          NOTIONAL_PER:  "5000"
+        shell: bash
         run: |
           set -e
           echo "NOTIONAL_PER=$NOTIONAL_PER"
+          echo "Picks (Top-${TOPK:-6}) for WEEK=${WEEK:-unknown}:"
+          python - <<'PY'
+          import os, pandas as pd, pathlib
+          p=pathlib.Path("backtests/picklist_highrsi_trend.csv")
+          df=pd.read_csv(p)
+          wkcol="week_start" if "week_start" in df.columns else "week"
+          week=os.environ.get("WEEK") or str(pd.to_datetime(df[wkcol], errors="coerce").dropna().dt.date.max())
+          k=int(os.getenv("TOPK","6"))
+          if "rank" in df.columns: df=df.sort_values(["rank","symbol"], ascending=[True,True])
+          elif "score" in df.columns: df=df.sort_values(["score","symbol"], ascending=[False,True])
+          picks=(df[pd.to_datetime(df[wkcol], errors="coerce").dt.date.astype(str)==week]["symbol"]
+                 .dropna().astype(str).head(k).tolist())
+          print("WEEK="+week, "TopK="+",".join(picks))
+          PY
+
+          # Gate to open (max 2h) to avoid rejections outside hours
+          python - <<'PY'
+          import os, sys, time, requests, datetime as dt
+          base = "https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
+          h = {"APCA-API-KEY-ID": os.environ["ALPACA_KEY"], "APCA-API-SECRET-KEY": os.environ["ALPACA_SECRET"]}
+          r = requests.get(f"{base}/v2/clock", headers=h, timeout=20)
+          c = r.json() if r.status_code==200 else {}
+          if c.get("is_open"): sys.exit(0)
+          next_open = c.get("next_open")
+          if not next_open: print("No next_open from clock; proceeding anyway"); sys.exit(0)
+          t = dt.datetime.fromisoformat(next_open.replace("Z","+00:00"))
+          now = dt.datetime.now(dt.timezone.utc)
+          wait = (t - now).total_seconds()
+          print(f"Market closed; sleeping {int(wait)}s until open (cap 7200s).")
+          if 0 < wait <= 7200: time.sleep(int(wait))
+          PY
+
           python execute_orders.py \
             --broker alpaca \
             --data-dir stock_data_400 \
             --picklist backtests/picklist_highrsi_trend.csv \
-            --week "${{ steps.when.outputs.friday }}" \
-            --topk 6 \
+            --week "${WEEK}" \
+            --topk "${TOPK:-6}" \
             --side buy \
-            --notional "$NOTIONAL_PER"
+            --notional "${NOTIONAL_PER}" \
+            --init-stop-atr-mult 1.75
 
       - name: Inspect orders file
+        shell: bash
         run: |
           set -e
-          f=$(ls -1t backtests/orders_*.json 2>/dev/null | head -n1 || true)
-          if [ -z "$f" ]; then echo "No orders file written."; exit 0; fi
+          f=$(ls -1 backtests/orders_*.json | tail -n1)
           echo "== $f =="
           cat "$f"
 
