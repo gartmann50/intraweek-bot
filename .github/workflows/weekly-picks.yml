@@ -2,18 +2,9 @@ name: Weekly Picks
 
 on:
   schedule:
-
-    # After U.S. close (Mon–Thu) — update trailing stops
-    - cron: "15 20 * * 1-4"   # EDT
-    - cron: "15 21 * * 1-4"   # EST
-
-    # Friday after close — build next week's picks / email
-    - cron: "15 20 * * 5"     # EDT
-    - cron: "15 21 * * 5"     # EST
-
-    # Weekday opens (Mon–Fri) — sells daily; buys only first session after Fri
-    - cron: "28 13 * * 1-5"   # EDT
-    - cron: "28 14 * * 1-5"   # EST
+    - cron: "25 12 * * 1-5"   # pre-open (sell exits; buys gate to first session)
+    - cron: "25 21 * * 1-5"   # after-close (trailing; Friday builds picks)
+    - cron: "45 19 * * 5"     # Friday pre-close (flatten with MOC)
 
   workflow_dispatch:
     inputs:
