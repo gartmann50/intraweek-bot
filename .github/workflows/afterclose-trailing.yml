@@ -40,8 +40,10 @@ jobs:
 
       # Download the picklist artifact produced by friday-build.yml
       - name: Download latest weekly picks
+        id: dl_picks
         uses: dawidd6/action-download-artifact@v2
         with:
+          repo: ${{ github.repository }}
           workflow: friday-build.yml
           branch: main
           workflow_conclusion: success
