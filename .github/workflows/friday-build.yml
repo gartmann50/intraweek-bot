@@ -64,15 +64,16 @@ jobs:
             --topk "${{ env.TOPK }}" \
             --until "${WEEK}" | tee backtests/top6_preview.txt
       
-      - name: Download 70D-highs artifact (if available)
-        uses: dawidd6/action-download-artifact@v2
-        continue-on-error: true
-        with:
-        repo: ${{ github.repository }}
-        workflow: hi70-scan.yml
-        workflow_conclusion: success
-        name: hi70-${{ steps.when.outputs.friday }}
-        path: backtests
+          - name: Download 70D-highs artifact (if available)
+            uses: dawidd6/action-download-artifact@v2
+            continue-on-error: true
+            with:
+              repo: ${{ github.repository }}
+              workflow: hi70-scan.yml
+              workflow_conclusion: success
+              name: hi70-${{ steps.when.outputs.friday }}
+              path: backtests
+
 
       
       - name: Email config (from secrets)
