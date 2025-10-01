@@ -1,0 +1,48 @@
+name: IW Bot — 70D Highs Scan
+
+on:
+  schedule:
+    - cron: "15 21 * * 5"          # ~after close Fri (EDT)
+    - cron: "15 20 * * 5"          # ~after close Fri (EST)
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: |
+          python -m pip install --upgrade pip
+          pip install pandas requests pyyaml
+      - name: Compute last Friday (Europe/Oslo)
+        id: when
+        shell: python
+        run: |
+          from datetime import datetime, timedelta
+          import zoneinfo, os
+          tz = zoneinfo.ZoneInfo("Europe/Oslo")
+          d = datetime.now(tz).date()
+          while d.weekday()!=4: d -= timedelta(days=1)
+          with open(os.environ["GITHUB_OUTPUT"],"a") as f:
+            f.write(f"friday={d.isoformat()}\n")
+          print("FRIDAY:", d)
+      - name: Scan 70D highs (≥$1B)
+        env:
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+        run: |
+          python tools/scan_70d_highs.py \
+            --friday "${{ steps.when.outputs.friday }}" \
+            --cap-min 1000000000 \
+            --pages 3 \
+            --out-dir backtests
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hi70-${{ steps.when.outputs.friday }}
+          path: |
+            backtests/hi70_thisweek.csv
+            backtests/hi70_digest.txt
