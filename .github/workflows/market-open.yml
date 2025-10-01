@@ -1,0 +1,141 @@
+name: IW Bot — Market Open
+
+on:
+  schedule:
+    - cron: "25 12 * * 1-5"   # pre-open (EST)
+    - cron: "25 13 * * 1-5"   # pre-open (EDT)
+  workflow_dispatch:
+    inputs:
+      force_buy:
+        description: "Force weekly buy now"
+        type: boolean
+        default: false
+
+concurrency:
+  group: iwbot-open
+  cancel-in-progress: true
+
+jobs:
+  open:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy requests
+      - name: Compute last Friday
+        id: when
+        shell: python
+        run: |
+          from datetime import datetime, timedelta
+          import zoneinfo, os
+          tz=zoneinfo.ZoneInfo("Europe/Oslo"); d=datetime.now(tz).date()
+          while d.weekday()!=4: d-=timedelta(days=1)
+          open(os.environ["GITHUB_OUTPUT"],"a").write(f"friday={d}\n")
+      - name: Download artifacts (picks + trailing)
+        uses: dawidd6/action-download-artifact@v2
+        with:
+          search_artifacts: true
+          workflow: friday-build.yml
+          name: weekly-picks-${{ steps.when.outputs.friday }}
+          path: backtests
+      - name: Download trailing exits (if any)
+        uses: dawidd6/action-download-artifact@v2
+        with:
+          search_artifacts: true
+          workflow: afterclose-trailing.yml
+          name: trailing-stops-${{ steps.when.outputs.friday }}
+          path: backtests
+          if_no_artifact_found: ignore
+      - name: Gate to U.S. open (sleep ≤2h)
+        id: gate
+        env:
+          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          ALPACA_ENV:    paper
+          FORCE_BUY:     ${{ inputs.force_buy }}
+        shell: python
+        run: |
+          import os, time, sys, requests, datetime as dt
+          if os.getenv("FORCE_BUY","false").lower()=="true":
+              open(os.environ["GITHUB_OUTPUT"],"a").write("go=1\n"); sys.exit(0)
+          base="https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
+          H={"APCA-API-KEY-ID":os.environ["ALPACA_KEY"],"APCA-API-SECRET-KEY":os.environ["ALPACA_SECRET"]}
+          c=requests.get(f"{base}/v2/clock",headers=H,timeout=20).json()
+          if c.get("is_open"): open(os.environ["GITHUB_OUTPUT"],"a").write("go=1\n"); sys.exit(0)
+          t=dt.datetime.fromisoformat(c["next_open"].replace("Z","+00:00"))
+          sec=max(0,(t-dt.datetime.now(dt.timezone.utc)).total_seconds())
+          if sec>7200: open(os.environ["GITHUB_OUTPUT"],"a").write("go=0\n"); sys.exit(0)
+          time.sleep(int(sec)+3); open(os.environ["GITHUB_OUTPUT"],"a").write("go=1\n")
+      - name: Execute exits at open (if any)
+        if: ${{ steps.gate.outputs.go == '1' }}
+        env:
+          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          ALPACA_ENV:    paper
+        run: |
+          if [ -s backtests/exit_symbols.txt ]; then
+            python execute_orders.py \
+              --broker alpaca \
+              --data-dir stock_data_400 \
+              --picklist backtests/picklist_highrsi_trend.csv \
+              --week "${{ steps.when.outputs.friday }}" \
+              --side sell
+          else
+            echo "No exits."
+          fi
+      - name: Decide if first session after Friday
+        if: ${{ steps.gate.outputs.go == '1' }}
+        id: buygate
+        env:
+          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          ALPACA_ENV:    paper
+        shell: python
+        run: |
+          import os,requests,datetime as dt
+          from zoneinfo import ZoneInfo
+          base="https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
+          H={"APCA-API-KEY-ID":os.environ["ALPACA_KEY"],"APCA-API-SECRET-KEY":os.environ["ALPACA_SECRET"]}
+          friday="${{ steps.when.outputs.friday }}"
+          start=(dt.date.fromisoformat(friday)+dt.timedelta(days=1)).isoformat()
+          end  =(dt.date.fromisoformat(friday)+dt.timedelta(days=7)).isoformat()
+          cal=requests.get(f"{base}/v2/calendar",params={"start":start,"end":end},headers=H,timeout=20).json()
+          first=(cal[0]["date"] if cal else None)
+          today=dt.datetime.now(dt.timezone.utc).astimezone(ZoneInfo("America/New_York")).date().isoformat()
+          do="1" if first and today==first else "0"
+          open(os.environ["GITHUB_OUTPUT"],"a").write(f"do={do}\n")
+          print("first:",first,"today:",today,"BUY=",do)
+      - name: Prepare buy list (Top-K)
+        if: ${{ steps.gate.outputs.go == '1' && steps.buygate.outputs.do == '1' }}
+        run: |
+          python - <<'PY'
+          import os, pandas as pd, pathlib as p
+          df=pd.read_csv('backtests/picklist_highrsi_trend.csv')
+          wk='week_start' if 'week_start' in df.columns else 'week'
+          w=str(pd.to_datetime(df[wk],errors='coerce').dropna().dt.date.max())
+          picks=(df[pd.to_datetime(df[wk],errors='coerce').dt.date.astype(str)==w]['symbol']
+                   .dropna().astype(str).head(6).tolist())
+          p.Path('backtests').mkdir(exist_ok=True); open('backtests/buy_symbols.txt','w').write("\n".join(picks))
+          print("picks:",picks)
+          PY
+      - name: Buy once (long-only)
+        if: ${{ (steps.gate.outputs.go == '1' && steps.buygate.outputs.do == '1') || inputs.force_buy == true }}
+        env:
+          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          ALPACA_ENV:    paper
+          NOTIONAL_PER:  "5000"
+        run: |
+          python execute_orders.py \
+            --broker alpaca \
+            --data-dir stock_data_400 \
+            --picklist backtests/picklist_highrsi_trend.csv \
+            --week "${{ steps.when.outputs.friday }}" \
+            --topk "6" \
+            --side buy \
+            --long-only \
+            --notional "${NOTIONAL_PER}" \
+            --init-stop-atr-mult 1.75
