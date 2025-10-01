@@ -41,10 +41,14 @@ jobs:
       - name: Download artifacts (picks + trailing)
         uses: dawidd6/action-download-artifact@v2
         with:
+          repo: ${{ github.repository }}
+          workflow: friday-build.yml          # <-- the workflow file that creates the picklist
+          workflow_conclusion: success
           search_artifacts: true
-          workflow: friday-build.yml
-          name: weekly-picks-${{ steps.when.outputs.friday }}
+          name_is_regexp: true
+          name: ^(weekly-picks-|trailing-stops-).*
           path: backtests
+          if_no_artifact_found: fail
       - name: Download trailing exits (if any)
         uses: dawidd6/action-download-artifact@v2
         with:
