@@ -38,17 +38,36 @@ jobs:
           tz=zoneinfo.ZoneInfo("Europe/Oslo"); d=datetime.now(tz).date()
           while d.weekday()!=4: d-=timedelta(days=1)
           open(os.environ["GITHUB_OUTPUT"],"a").write(f"friday={d}\n")
+
+      - name: List recent artifacts (debug)
+        run: gh run artifacts --limit 20 || true
+        env:
+           GH_TOKEN: ${{ github.token }}
+
+
       - name: Download artifacts (picks + trailing)
         uses: dawidd6/action-download-artifact@v2
         with:
-          repo: ${{ github.repository }}
-          workflow: friday-build.yml          # <-- the workflow file that creates the picklist
+          workflow: friday-build.yml      # file in .github/workflows
+          branch: main                    # the branch where Friday build runs
+          event: schedule                 # only scheduled runs
           workflow_conclusion: success
-          search_artifacts: true
-          name_is_regexp: true
-          name: ^(weekly-picks-|trailing-stops-).*
+          # pull the two artifacts produced by the Friday build:
+          name: weekly-picks-${{ steps.when.outputs.friday }}
           path: backtests
           if_no_artifact_found: fail
+
+      - name: Download trailing stops
+        uses: dawidd6/action-download-artifact@v2
+        with:
+          workflow: friday-build.yml
+          branch: main
+          event: schedule
+          workflow_conclusion: success
+          name: trailing-stops-${{ steps.when.outputs.friday }}
+          path: backtests
+          if_no_artifact_found: warn
+
       
       - name: Normalize picklist path
         shell: bash
