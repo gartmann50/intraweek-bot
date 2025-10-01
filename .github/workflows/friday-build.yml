@@ -1,0 +1,67 @@
+name: IW Bot — Friday Build
+
+on:
+  schedule:
+    - cron: "25 21 * * 5"     # Friday after U.S. close (EST)
+    - cron: "25 20 * * 5"     # Friday after U.S. close (EDT)
+  workflow_dispatch:
+    inputs:
+      topk:
+        description: "Top-K to preview/email"
+        required: false
+        default: "6"
+
+concurrency:
+  group: iwbot-friday-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      TOPK:  ${{ inputs.topk != '' && inputs.topk || '6' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy pyyaml requests
+      - name: Compute last Friday (Europe/Oslo)
+        id: when
+        shell: python
+        run: |
+          from datetime import datetime, timedelta
+          import zoneinfo, os, json
+          tz=zoneinfo.ZoneInfo("Europe/Oslo"); now=datetime.now(tz).date()
+          while now.weekday()!=4: now-=timedelta(days=1)
+          mon=(now+timedelta(days=3)).isoformat()
+          with open("runner_dates.json","w") as f: json.dump({"friday":now.isoformat(),"monday":mon},f)
+          open(os.environ["GITHUB_OUTPUT"],"a").write(f"friday={now}\n")
+      - name: Cache dataset between runs
+        uses: actions/cache@v4
+        with:
+          path: stock_data_400
+          key: polygon-dataset-${{ steps.when.outputs.friday }}
+          restore-keys: polygon-dataset-
+      - name: Fetch dataset + build picklist
+        run: |
+          python build_picklist_parametric.py \
+            --data-dir stock_data_400 \
+            --rsi-min 68 --max-ext20 0.15 --top-per-week 40 \
+            --until "${{ steps.when.outputs.friday }}" \
+            --out backtests/picklist_highrsi_trend.csv
+      - name: Preview Top-K (save file)
+        run: |
+          python preview_top6.py \
+            --picklist backtests/picklist_highrsi_trend.csv \
+            --topk "${{ env.TOPK }}" \
+            --until "${{ steps.when.outputs.friday }}" | tee backtests/top6_preview.txt
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: weekly-picks-${{ steps.when.outputs.friday }}
+          path: |
+            backtests/picklist_highrsi_trend.csv
+            backtests/top6_preview.txt
+            runner_dates.json
