@@ -1,0 +1,97 @@
+name: IW Bot — After-Close Trailing
+
+on:
+  schedule:
+    - cron: "25 21 * * 1-5"   # EST
+    - cron: "25 20 * * 1-5"   # EDT
+  workflow_dispatch: {}
+
+concurrency:
+  group: iwbot-trailing
+  cancel-in-progress: true
+
+jobs:
+  trail:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy requests
+      - name: Compute last Friday
+        id: when
+        shell: python
+        run: |
+          from datetime import datetime, timedelta
+          import zoneinfo, os
+          tz=zoneinfo.ZoneInfo("Europe/Oslo"); d=datetime.now(tz).date()
+          while d.weekday()!=4: d-=timedelta(days=1)
+          open(os.environ["GITHUB_OUTPUT"],"a").write(f"friday={d}\n")
+      - name: Download latest weekly picks
+        uses: dawidd6/action-download-artifact@v2
+        with:
+          name: weekly-picks-${{ steps.when.outputs.friday }}
+          path: backtests
+          if_no_artifact_found: ignore
+      - name: Build trailing + exits
+        run: |
+          python trailing_stops.py \
+            --data-dir stock_data_400 \
+            --picklist backtests/picklist_highrsi_trend.csv \
+            --week "${{ steps.when.outputs.friday }}" \
+            --monday "" \
+            --topk "6" \
+            --positions backtests/positions.json \
+            --method atr --atr-win 14 --atr-mult 1.75
+      - name: Apply trailing stops to Alpaca (tighten only)
+        env:
+          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          ALPACA_ENV:    paper
+        shell: python
+        run: |
+          import os, sys, requests, pandas as pd
+          if not (os.getenv("ALPACA_KEY") and os.getenv("ALPACA_SECRET")):
+              print("Alpaca not configured; skip."); sys.exit(0)
+          base="https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
+          H={"APCA-API-KEY-ID":os.environ["ALPACA_KEY"],"APCA-API-SECRET-KEY":os.environ["ALPACA_SECRET"]}
+          try: df=pd.read_csv("backtests/stops.csv")
+          except: sys.exit(0)
+          df.columns=[c.lower() for c in df.columns]
+          sym="symbol"; stop="new_stop" if "new_stop" in df.columns else ("stop" if "stop" in df.columns else None)
+          if not stop: sys.exit(0)
+          pos=requests.get(f"{base}/v2/positions",headers=H,timeout=20).json()
+          pos={p["symbol"]:p for p in pos}
+          open_orders=requests.get(f"{base}/v2/orders",params={"status":"open","limit":500},headers=H,timeout=20).json()
+          bysym={}
+          for od in open_orders:
+              if od.get("type") in ("stop","stop_limit"):
+                  bysym.setdefault(od["symbol"],[]).append(od)
+          def better(curr,new,side): 
+              return new>curr if side=="long" else new<curr
+          placed=0
+          for _,r in df.iterrows():
+              s=str(r[sym]).upper(); 
+              if s not in pos: continue
+              q=abs(float(pos[s]["qty"])); side="long" if float(pos[s]["qty"])>0 else "short"
+              try: ns=float(r[stop])
+              except: continue
+              curr=None; oid=None
+              for od in bysym.get(s,[]):
+                  try: curr=float(od.get("stop_price") or od.get("limit_price")); oid=od["id"]; break
+                  except: pass
+              if curr is not None and not better(curr,ns,side): continue
+              if oid: requests.delete(f"{base}/v2/orders/{oid}",headers=H,timeout=20)
+              o={"symbol":s,"qty":q,"side":"sell" if side=="long" else "buy","type":"stop","time_in_force":"day","stop_price":ns}
+              requests.post(f"{base}/v2/orders",headers=H,json=o,timeout=20); placed+=1
+          print("tightened:", placed)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: trailing-stops-${{ steps.when.outputs.friday }}
+          path: |
+            backtests/positions.json
+            backtests/stops.csv
+            backtests/exit_symbols.txt
+            backtests/trailing_report.txt
