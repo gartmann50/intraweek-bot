@@ -181,21 +181,7 @@ jobs:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
         run: |
-          curl -sS \
-            -H "APCA-API-KEY-ID: $ALPACA_KEY" \
-            -H "APCA-API-SECRET-KEY: $ALPACA_SECRET" \
+          curl -sS -H "APCA-API-KEY-ID: $ALPACA_KEY" -H "APCA-API-SECRET-KEY: $ALPACA_SECRET" \
             https://paper-api.alpaca.markets/v2/positions \
-          | python - <<'PY'
-           import sys, json
-        try:
-           j = json.load(sys.stdin)
-           if isinstance(j, list) and j:
-              print("Open positions:", [(p.get("symbol"), p.get("qty")) for p in j])
-        else:
-              print("Open positions: none")
-        except Exception as e:
-          print("Positions parse error:", e)
-      PY
+          | python -c 'import sys,json; j=json.load(sys.stdin); print("Open positions: none" if not isinstance(j,list) or not j else "Open positions: " + ", ".join(f"{p.get(\"symbol\")}:{p.get(\"qty\")}" for p in j))'
 
-
-            
