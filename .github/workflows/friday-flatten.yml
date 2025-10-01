@@ -2,9 +2,16 @@ name: IW Bot — Friday Flatten (MOC)
 
 on:
   schedule:
-    - cron: "45 19 * * 5"   # ~10 min before close (EST)
-    - cron: "45 20 * * 5"   # ~10 min before close (EDT)
-  workflow_dispatch: {}
+    # ~10 minutes before close (UTC times; adjust if you want 50 instead of 45)
+    - cron: "45 19 * * 5"   # close in EDT (NYC summer)
+    - cron: "45 20 * * 5"   # close in EST (NYC winter)
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Force MOC even if not Friday (for testing)"
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: iwbot-flatten
@@ -13,111 +20,49 @@ concurrency:
 jobs:
   flat:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
-      - run: python -m pip install --upgrade pip requests
-     
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: python -m pip install --upgrade pip requests
+
+      # --- Inspect current open positions (clean, no inline heredoc) ---
       - name: Show Alpaca positions (paper)
+        run: python tools/open_positions.py
+        env:
+          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          ALPACA_ENV:    paper
+
+      # --- Place MOC orders on Friday. When launched manually with force=true, run anyway. ---
+      - name: Flatten with MOC (scheduled run)
+        if: ${{ github.event_name == 'schedule' }}
+        run: python tools/moc_flatten.py
+        env:
+          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          ALPACA_ENV:    paper
+
+      - name: Flatten with MOC (manual force)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.force == true }}
+        run: python tools/moc_flatten.py --force
+        env:
+          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          ALPACA_ENV:    paper
+
+      # --- (Optional) show positions again after MOC so you see the effect in logs ---
+      - name: Show positions after MOC (paper)
         if: always()
+        run: python tools/open_positions.py
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
           ALPACA_ENV:    paper
-        shell: bash
-        run: |
-          set -euo pipefail
-          BASE="https://paper-api.alpaca.markets"
-          [ "${ALPACA_ENV:-paper}" != "paper" ] && BASE="https://api.alpaca.markets"
-          curl -sS -H "APCA-API-KEY-ID: $ALPACA_KEY" -H "APCA-API-SECRET-KEY: $ALPACA_SECRET" \
-            "$BASE/v2/positions" | python - <<'PY'
-            import sys, json
-        try:
-          j=json.load(sys.stdin)
-          if not isinstance(j,list) or not j:
-              print("Open positions: none")
-           else:
-              rows=[f"{p.get('symbol')} qty={p.get('qty')} side={'long' if float(p.get('qty','0'))>0 else 'short'}"
-                  for p in j]
-              print("Open positions:", ", ".join(rows))
-      except Exception as e:
-          print("Positions parse error:", e)
-      PY
-
-      - name: Flatten with MOC
-        env:
-          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
-          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
-          ALPACA_ENV:    paper
-        shell: python
-        run: |
-          import os, requests, datetime as dt
-          from zoneinfo import ZoneInfo
-
-          key=os.getenv("ALPACA_KEY"); sec=os.getenv("ALPACA_SECRET")
-          if not key or not sec:
-              print("Alpaca not configured; skipping."); raise SystemExit(0)
-
-          base="https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
-          H={"APCA-API-KEY-ID":key, "APCA-API-SECRET-KEY":sec}
-
-          now_ny=dt.datetime.now(dt.timezone.utc).astimezone(ZoneInfo("America/New_York"))
-          print("NY now:", now_ny.isoformat(), "| weekday:", now_ny.weekday(), "(0=Mon,...,4=Fri)")
-          if now_ny.weekday()!=4:
-              print("Not Friday in New York — skipping MOC."); raise SystemExit(0)
-
-          # 1) pull open positions
-          r=requests.get(f"{base}/v2/positions", headers=H, timeout=20)
-          if r.status_code!=200:
-              print("positions error", r.status_code, r.text); raise SystemExit(0)
-          positions=r.json() if isinstance(r.json(), list) else []
-          if not positions:
-              print("No open positions — nothing to close."); raise SystemExit(0)
-
-          # 2) open orders (we'll cancel per symbol to avoid conflicts)
-          ro=requests.get(f"{base}/v2/orders", params={"status":"open","limit":500}, headers=H, timeout=20)
-          open_orders=ro.json() if ro.status_code==200 else []
-
-          def cancel_open_for(sym):
-              for od in open_orders:
-                  if od.get("symbol")==sym:
-                      oid=od.get("id")
-                      try:
-                          requests.delete(f"{base}/v2/orders/{oid}", headers=H, timeout=15)
-                     except Exception:
-                          pass
-
-          placed=0
-          for p in positions:
-              try:
-            sym=p.get("symbol","").upper().strip()
-            qty=float(p.get("qty","0") or 0)
-            if qty==0 or not sym: 
-                continue
-            # cancel existing working orders for the symbol
-            cancel_open_for(sym)
-            side="sell" if qty>0 else "buy"   # sell longs, buy to cover shorts
-
-            order={
-              "symbol": sym,
-              "qty": abs(qty),
-              "side": side,
-              "type": "market",
-              "time_in_force": "cls"    # Market-On-Close
-            }
-            rr=requests.post(f"{base}/v2/orders", headers=H, json=order, timeout=20)
-            if rr.status_code==200:
-                placed+=1
-                print(f"MOC placed for {sym}: side={side}, qty={abs(qty)}")
-            else:
-                print(f"MOC error for {sym}: {rr.status_code} {rr.text[:220]}")
-        except Exception as e:
-            print("error on position:", p, e)
-
-    print("MOC placed:", placed)
-
-      
-      
-      
-      
