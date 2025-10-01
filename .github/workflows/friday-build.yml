@@ -70,43 +70,64 @@ jobs:
             > backtests/top6_preview.txt
 
       - name: Download 70D-highs artifact (if available)
+        if: always()
         uses: dawidd6/action-download-artifact@v2
-        continue-on-error: true
         with:
           repo: ${{ github.repository }}
-          workflow: hi70-scan.yml
+          workflow: hi70-scan.yml           # the workflow that builds the 70D-highs artifact
           workflow_conclusion: success
-          name: hi70-${{ steps.when.outputs.friday }}
+          branch: main
+          name_is_regexp: true
+          name: ^hi70-.*$                   # match any hi70-* artifact name
           path: backtests
-          if_no_artifact_found: warn    # <— avoids a red ❌ if scan hasn’t run yet
+          allow_forks: true
+          if_no_artifact_found: warn        # <- don't fail the job if it’s missing
 
       
       - name: Email config (from secrets)
         run: |
           cat > config_notify.yaml <<'YAML'
+          # primary keys
           smtp_user: ${{ secrets.SMTP_USER }}
           smtp_pass: ${{ secrets.SMTP_PASS }}
-          smtp_to:   ${{ secrets.SMTP_TO }}
           smtp_from: ${{ secrets.SMTP_FROM }}
+          smtp_to:   ${{ secrets.SMTP_TO }}
           host: smtp.gmail.com
           port: 587
           use_tls: true
+
+          # aliases some scripts expect
+          from: ${{ secrets.SMTP_FROM }}
+          to:   ${{ secrets.SMTP_TO }}
           YAML
 
       - name: Email weekly picks + 70D highs
         env:
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
-          SMTP_TO:   ${{ secrets.SMTP_TO }}
-          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          SMTP_USER:  ${{ secrets.SMTP_USER }}
+          SMTP_PASS:  ${{ secrets.SMTP_PASS }}
+          SMTP_FROM:  ${{ secrets.SMTP_FROM }}
+          SMTP_TO:    ${{ secrets.SMTP_TO }}
         run: |
-          # re-use the config written earlier in your workflow
-          python tools/email_combined.py \
-            --config config_notify.yaml \
-            --week "${{ steps.when.outputs.friday }}" \
-            --topk_path backtests/top6_preview.txt \
-            --hi70_digest backtests/hi70_digest.txt
-      
+          python - <<'PY'
+          import os, sys, re, yaml
+          cfg = yaml.safe_load(open('config_notify.yaml')) or {}
+          def split_list(x):
+              return [p.strip() for p in re.split(r'[;,]', str(x or '')) if p.strip()]
+
+          smtp_from = cfg.get('smtp_from') or cfg.get('from') or os.getenv('SMTP_FROM')
+          rcpts     = split_list(cfg.get('smtp_to') or cfg.get('to') or os.getenv('SMTP_TO'))
+
+          if not smtp_from:
+              print('FATAL: smtp_from / from / SMTP_FROM is empty'); sys.exit(1)
+          if not rcpts:
+              print('FATAL: smtp_to / to / SMTP_TO is empty'); sys.exit(1)
+
+          print('From:', smtp_from[:1] + '***')
+          print('Recipients:', len(rcpts))
+          PY
+
+          # now send (your script reads config_notify.yaml)
+          python tools/email_combined.py
       
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
