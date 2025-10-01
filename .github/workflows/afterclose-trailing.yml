@@ -13,6 +13,10 @@ concurrency:
 jobs:
   trail:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read      # <-- REQUIRED to download artifacts from friday-build
+    
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -20,21 +24,32 @@ jobs:
       - run: |
           python -m pip install --upgrade pip
           pip install pandas numpy requests
+      # Compute last Friday (if you don't already)
       - name: Compute last Friday
         id: when
         shell: python
         run: |
           from datetime import datetime, timedelta
           import zoneinfo, os
-          tz=zoneinfo.ZoneInfo("Europe/Oslo"); d=datetime.now(tz).date()
-          while d.weekday()!=4: d-=timedelta(days=1)
-          open(os.environ["GITHUB_OUTPUT"],"a").write(f"friday={d}\n")
+          tz = zoneinfo.ZoneInfo("Europe/Oslo")
+          d  = datetime.now(tz).date()
+          while d.weekday() != 4:   # 0=Mon..4=Fri
+              d -= timedelta(days=1)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"friday={d}\n")
+
+      # Download the picklist artifact produced by friday-build.yml
       - name: Download latest weekly picks
         uses: dawidd6/action-download-artifact@v2
         with:
-          name: weekly-picks-${{ steps.when.outputs.friday }}
+          workflow: friday-build.yml
+          branch: main
+          workflow_conclusion: success
+          name: ^weekly-picks-${{ steps.when.outputs.friday }}$
+          name_is_regexp: true
           path: backtests
-          if_no_artifact_found: ignore
+          if_no_artifact_found: fail
+
       - name: Build trailing + exits
         run: |
           python trailing_stops.py \
