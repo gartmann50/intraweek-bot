@@ -59,10 +59,15 @@ jobs:
             --out backtests/picklist_highrsi_trend.csv
       - name: Preview Top-K (save file)
         run: |
-          python preview_top6.py \
+          set -e
+           python preview_top6.py \
             --picklist backtests/picklist_highrsi_trend.csv \
-            --topk "${{ env.TOPK }}" \
-            --until "${WEEK}" | tee backtests/top6_preview.txt
+            --topk "${{ inputs.topk != '' && inputs.topk || '6' }}" \
+            --week "${{ steps.when.outputs.friday }}" \
+            > backtests/top6_preview.txt
+
+          echo "== Top-K preview saved to backtests/top6_preview.txt =="
+          tail -n +1 backtests/top6_preview.txt
       
           - name: Download 70D-highs artifact (if available)
             uses: dawidd6/action-download-artifact@v2
