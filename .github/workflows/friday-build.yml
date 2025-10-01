@@ -57,6 +57,28 @@ jobs:
             --picklist backtests/picklist_highrsi_trend.csv \
             --topk "${{ env.TOPK }}" \
             --until "${{ steps.when.outputs.friday }}" | tee backtests/top6_preview.txt
+      - name: Email config (from secrets)
+        run: |
+          cat > config_notify.yaml <<'YAML'
+          smtp_user: ${{ secrets.SMTP_USER }}
+          smtp_pass: ${{ secrets.SMTP_PASS }}
+          smtp_to:   ${{ secrets.SMTP_TO }}
+          smtp_from: ${{ secrets.SMTP_FROM }}
+          host: smtp.gmail.com
+          port: 587
+          use_tls: true
+          YAML
+
+      - name: Email weekly picks (Top-6)
+        run: |
+          python notify_picks.py \
+            --config config_notify.yaml \
+            --picklist backtests/picklist_highrsi_trend.csv \
+            --topk 6 \
+            --week "${{ steps.when.outputs.friday }}"
+
+      
+      
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
