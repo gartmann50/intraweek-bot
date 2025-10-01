@@ -52,6 +52,38 @@ jobs:
           path: backtests
           if_no_artifact_found: fail
 
+      - name: Normalize picklist path (copy to backtests/)
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s globstar nullglob
+          dest="backtests/picklist_highrsi_trend.csv"
+          found=""
+          # try exact name first
+          for f in backtests/**/picklist_highrsi_trend.csv backtests/picklist_highrsi_trend.csv; do
+            if [[ -f "$f" ]]; then
+              cp -f "$f" "$dest"
+              found="1"
+              break
+            fi
+          done
+          # otherwise, fall back to any picklist_*.csv in the artifact
+          if [[ -z "$found" ]]; then
+            for f in backtests/**/picklist_*.csv; do
+              cp -f "$f" "$dest"
+              found="1"
+              break
+            done
+          fi
+          if [[ -z "$found" ]]; then
+            echo "Picklist CSV not found in artifact. Available files:" >&2
+            find backtests -maxdepth 3 -type f -printf '%P\n' >&2 || true
+            exit 78
+          fi
+          echo "Using picklist: $dest"
+          ls -lh "$dest"
+
+
       - name: Sanity check picklist
         run: |
            echo "pwd=$(pwd)"
