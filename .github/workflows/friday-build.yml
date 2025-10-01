@@ -38,6 +38,12 @@ jobs:
           mon=(now+timedelta(days=3)).isoformat()
           with open("runner_dates.json","w") as f: json.dump({"friday":now.isoformat(),"monday":mon},f)
           open(os.environ["GITHUB_OUTPUT"],"a").write(f"friday={now}\n")
+      
+      - name: Export WEEK (nominal Monday) for later steps
+        run: echo "WEEK=${{ steps.when.outputs.monday }}" >> $GITHUB_ENV
+
+      
+      
       - name: Cache dataset between runs
         uses: actions/cache@v4
         with:
@@ -56,7 +62,7 @@ jobs:
           python preview_top6.py \
             --picklist backtests/picklist_highrsi_trend.csv \
             --topk "${{ env.TOPK }}" \
-            --until "${{ steps.when.outputs.friday }}" | tee backtests/top6_preview.txt
+            --until "${WEEK}" | tee backtests/top6_preview.txt
       - name: Email config (from secrets)
         run: |
           cat > config_notify.yaml <<'YAML'
@@ -74,8 +80,8 @@ jobs:
           python notify_picks.py \
             --config config_notify.yaml \
             --picklist backtests/picklist_highrsi_trend.csv \
-            --topk 6 \
-            --week "${{ steps.when.outputs.friday }}"
+            --topk ${{ inputs.topk != '' && inputs.topk || '6' }} \
+            --week "${WEEK}"
 
       
       
