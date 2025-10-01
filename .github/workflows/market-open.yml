@@ -140,6 +140,5 @@ jobs:
             --week "${{ steps.when.outputs.friday }}" \
             --topk "6" \
             --side buy \
-            --long-only \
             --notional "${NOTIONAL_PER}" \
             --init-stop-atr-mult 1.75
