@@ -151,19 +151,29 @@ jobs:
           print("picks:",picks)
           PY
       - name: Buy once (long-only)
-        if: ${{ (steps.gate.outputs.go == '1' && steps.buygate.outputs.do == '1') || inputs.force_buy == true }}
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
           ALPACA_ENV:    paper
-          NOTIONAL_PER:  "5000"
+          NOTIONAL_PER:  "5000"     # <-- set your per-position budget here
         run: |
+          set -e
+          echo "NOTIONAL_PER=$NOTIONAL_PER"
           python execute_orders.py \
             --broker alpaca \
             --data-dir stock_data_400 \
             --picklist backtests/picklist_highrsi_trend.csv \
             --week "${{ steps.when.outputs.friday }}" \
-            --topk "6" \
+            --topk 6 \
             --side buy \
-            --notional "${NOTIONAL_PER}" \
-            --init-stop-atr-mult 1.75
+            --notional "$NOTIONAL_PER"
+
+      - name: Inspect orders file
+        run: |
+          set -e
+          f=$(ls -1t backtests/orders_*.json 2>/dev/null | head -n1 || true)
+          if [ -z "$f" ]; then echo "No orders file written."; exit 0; fi
+          echo "== $f =="
+          cat "$f"
+
+            
