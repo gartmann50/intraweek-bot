@@ -46,3 +46,11 @@ jobs:
           path: |
             backtests/hi70_thisweek.csv
             backtests/hi70_digest.txt
+
+      
+      - name: Sanity — list hi70 outputs
+        run: |
+          ls -l backtests || true
+          echo
+          [ -f backtests/hi70_thisweek.csv ] && echo "CSV present" || echo "CSV missing"
+          [ -f backtests/hi70_digest.txt ] && echo "Digest present" || echo "Digest missing"
