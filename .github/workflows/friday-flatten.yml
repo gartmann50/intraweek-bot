@@ -1,0 +1,44 @@
+name: IW Bot — Friday Flatten (MOC)
+
+on:
+  schedule:
+    - cron: "45 19 * * 5"   # ~10 min before close (EST)
+    - cron: "45 20 * * 5"   # ~10 min before close (EDT)
+  workflow_dispatch: {}
+
+concurrency:
+  group: iwbot-flatten
+  cancel-in-progress: true
+
+jobs:
+  flat:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: python -m pip install --upgrade pip requests
+      - name: Flatten with MOC
+        env:
+          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          ALPACA_ENV:    paper
+        shell: python
+        run: |
+          import os, requests, datetime as dt
+          base="https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
+          H={"APCA-API-KEY-ID":os.environ["ALPACA_KEY"],"APCA-API-SECRET-KEY":os.environ["ALPACA_SECRET"]}
+          pos=requests.get(f"{base}/v2/positions",headers=H,timeout=20).json()
+          if not pos: print("No positions."); raise SystemExit(0)
+          oo=requests.get(f"{base}/v2/orders",params={"status":"open","limit":500},headers=H,timeout=20).json()
+          today=dt.date.today().isoformat().replace("-","")
+          def has_moc(sym,side):
+              return any(o.get("symbol")==sym and o.get("time_in_force")=="cls" and o.get("side")==side and o.get("status") in ("new","accepted","open","partially_filled") for o in oo)
+          placed=0
+          for p in pos:
+              q=float(p["qty"]); side="sell" if q>0 else "buy"; qty=abs(q)
+              if qty<=0 or has_moc(p["symbol"],side): continue
+              od={"symbol":p["symbol"],"qty":qty,"side":side,"type":"market","time_in_force":"cls","client_order_id":f"iwbot-flat-{today}-{p['symbol']}"}
+              r=requests.post(f"{base}/v2/orders",headers=H,json=od,timeout=20)
+              if r.status_code==200: placed+=1
+          print("MOC placed:", placed)
