@@ -8,8 +8,8 @@ on:
   workflow_dispatch:
     inputs:
       force:
-        description: "Force MOC even if not Friday (for testing)"
-        required: false
+        description: "Flatten immediately (market DAY) instead of MOC)"
+        required: true
         type: boolean
         default: false
 
@@ -50,13 +50,14 @@ jobs:
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
           ALPACA_ENV:    paper
 
-      - name: Flatten with MOC (manual force)
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.force == true }}
-        run: python tools/moc_flatten.py --force
+      - name: Flatten positions (MOC on schedule; DAY if forced)
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
           ALPACA_ENV:    paper
+          FORCE:         ${{ inputs.force }}   # true when you tick the checkbox
+        run: python tools/flatten_positions.py
+
 
       # --- (Optional) show positions again after MOC so you see the effect in logs ---
       - name: Show positions after MOC (paper)
