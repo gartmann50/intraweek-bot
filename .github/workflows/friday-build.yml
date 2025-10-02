@@ -85,47 +85,43 @@ jobs:
 
       - name: Build combined email body (picks + 70D highs)
         id: emsg
-        shell: python
+        shell: bash
         run: |
+          python - <<'PY'
           import os, csv
 
-          def exists(p): 
-              try: 
+          def exists(p):
+              try:
                   return os.path.exists(p)
               except Exception:
-            return False
+                  return False
 
           def to_float(x, default=0.0):
-              try:
-                  return float(x)
+               try:
+                   return float(x)
               except Exception:
                   return default
 
           lines = []
 
-          # Optional weekly picks preview, if you create it elsewhere
-          preview_txt = "backtests/top6_preview.txt"
-          if exists(preview_txt):
+          # Optional preview of weekly picks if you produce it elsewhere
+          preview = "backtests/top6_preview.txt"
+          if exists(preview):
               lines.append("== Weekly Top-K Preview ==")
-              with open(preview_txt, "r", encoding="utf-8") as f:
+              with open(preview, "r", encoding="utf-8") as f:
                   lines.append(f.read().strip())
               lines.append("")
 
           lines.append("== 70D High Breakouts ==")
-          hi70_csv = "backtests/hi70_thisweek.csv"
-          hi70_digest = "backtests/hi70_digest.txt"
+          csv_path    = "backtests/hi70_thisweek.csv"
+          digest_path = "backtests/hi70_digest.txt"
 
-          if exists(hi70_csv):
-              with open(hi70_csv, newline="", encoding="utf-8") as f:
+          if exists(csv_path):
+              with open(csv_path, newline="", encoding="utf-8") as f:
                   rows = list(csv.DictReader(f))
-
               if rows:
-                  # If your CSV already contains topN in order, you could skip sorting;
-                  # otherwise sort by market cap desc just in case.
-                  rows = sorted(
-                      rows, key=lambda r: to_float(r.get("market_cap")), reverse=True
-                  )[:10]
-
+                  # Keep top 10 by market cap (defensive: sort here too)
+                  rows = sorted(rows, key=lambda r: to_float(r.get("market_cap")), reverse=True)[:10]
                   lines.append("Top 10 by market cap:")
                   for r in rows:
                       sym   = (r.get("symbol") or "?").strip()
@@ -141,11 +137,9 @@ jobs:
                           f"high={wh:.2f} close={wc:.2f} gap(max)={max(gh,gc):.2f}% first={first}"
                       )
               else:
-                  # CSV exists but has no data rows (header only)
                   lines.append("No 70D breakouts this week.")
-          elif exists(hi70_digest):
-              # Fallback: include the digest text if CSV is missing
-              with open(hi70_digest, "r", encoding="utf-8") as f:
+          elif exists(digest_path):
+              with open(digest_path, "r", encoding="utf-8") as f:
                   lines.append(f.read().strip())
           else:
               lines.append("No 70D scan artifact found (workflow might not have run yet).")
@@ -153,11 +147,13 @@ jobs:
           body = "\n".join(lines).strip() + "\n"
           print(body)
 
-           # Emit as step output
-           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
-               fh.write("body<<__EOT__\n")
-               fh.write(body)
-               fh.write("\n__EOT__\n")
+          # pass body to later steps
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
+              fh.write("body<<__EOT__\n")
+              fh.write(body)
+              fh.write("\n__EOT__\n")
+          PY
+
       
       - name: Email config (from secrets)
         run: |
