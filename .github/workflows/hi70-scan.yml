@@ -36,7 +36,6 @@ jobs:
           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
         run: |
           python tools/scan_70d_highs.py \
-            --friday "${{ steps.when.outputs.friday }}" \
             --since-days 130 \
             --pages 3 \
             --top 10 \
