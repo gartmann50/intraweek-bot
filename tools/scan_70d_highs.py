@@ -85,12 +85,14 @@ class Http:
         raise RuntimeError(f"HTTP 429 backoff exceeded on {url}")
 
     def all_cs_tickers(self, pages: int = 3, asof: date | None = None) -> List[Dict[str, Any]]:
-    """
-    Fetch up to 'pages' * 1000 common stocks (type=CS, active=true) as of a given date,
-    so that 'market_cap' is populated.
+    """Return up to pages*1000 active common-stock tickers ('CS') **as of** `asof`.
+
+    Passing a `date` forces Polygon to populate `market_cap` on /v3/reference/tickers,
+    which avoids dropping everything when you filter by cap.
     """
     out: List[Dict[str, Any]] = []
     cursor = None
+
     for _ in range(pages):
         params = {
             "market": "stocks",
@@ -98,15 +100,19 @@ class Http:
             "active": "true",
             "limit": 1000,
         }
-        if asof:
-            params["date"] = asof.isoformat()   # <-- THIS unlocks market_cap
+        if asof is not None:
+            params["date"] = asof.isoformat()
         if cursor:
             params["cursor"] = cursor
+
         j = self.get("/v3/reference/tickers", params)
         out.extend(j.get("results") or [])
-        cursor = j.get("next_url_params", {}).get("cursor")
+
+        # Polygon returns a cursor for the next page in next_url_params.cursor
+        cursor = (j.get("next_url_params") or {}).get("cursor")
         if not cursor:
             break
+
     return out
 
 
