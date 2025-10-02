@@ -56,6 +56,8 @@ def parse_args():
     p.add_argument("--out-dir", default="backtests")
     p.add_argument("--min-price", type=float, default=5.0)
     p.add_argument("--min-dollar-vol", type=float, default=3_000_000)
+    # ✱ NEW: make friday optional
+    p.add_argument("--friday", dest="friday", default=None, help="YYYY-MM-DD; default = last Friday (NY)")
     return p.parse_args()
 
     fri: Optional[date] = None
@@ -302,7 +304,9 @@ def main():
     AUTH = {"Authorization": f"Bearer {cfg.api_key}"}
 
     # Determine friday + week window
-    fri = cfg.friday or last_friday_ny()
+    fri_str = cfg.friday or last_friday_ny().isoformat()
+    import datetime as dt
+    fri = dt.date.fromisoformat(fri_str)
     mon = monday_of_week(fri)
     bars_from = mon - timedelta(days=cfg.since_days)
     print(f"Week window: {mon} .. {fri} | bars from: {bars_from} .. {fri}")
