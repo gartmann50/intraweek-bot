@@ -86,12 +86,15 @@ jobs:
       - name: Build combined email body (picks + 70D highs)
         shell: bash
         run: |
-          python - <<'PY'
-          import os, sys, csv, glob, io
+          set -euo pipefail
       
+          # Write Python to a file (avoids heredoc delimiter/indent issues)
+          cat > _email_merge.py <<'PY'
+          import os, sys, csv, glob, io
+          
           out_path = "email_body.txt"
           parts = []
-      
+          
           # ------- Picks section (try a few common files/artifacts) -------
           picks_txt = None
           for pat in (
@@ -104,12 +107,11 @@ jobs:
               if m:
                   picks_txt = m[0]
                   break
-      
+          
           if picks_txt and os.path.getsize(picks_txt) > 0:
               with open(picks_txt, "r", encoding="utf-8", errors="ignore") as f:
                   parts.append("WEEKLY PICKS\n=============\n" + f.read().strip())
           else:
-              # Fall back to a CSV view if a text preview isn't present
               picks_csv = None
               for pat in (
                   "backtests/picklist_highrsi_trend.csv",
@@ -125,8 +127,7 @@ jobs:
                   try:
                       with open(picks_csv, newline="", encoding="utf-8") as f:
                           r = csv.reader(f)
-                          hdr = next(r, [])
-                          # show up to 10 rows for the email body
+                          _hdr = next(r, [])
                           for _ in range(10):
                               row = next(r, None)
                               if row is None:
@@ -137,7 +138,7 @@ jobs:
                   parts.append(buf.getvalue())
               else:
                   parts.append("WEEKLY PICKS\n=============\n(no picks preview found)")
-      
+          
           # ------- 70D highs section -------
           hi_digest = None
           for pat in ("backtests/hi70_digest.txt", "backtests/hi70/hi70_digest.txt"):
@@ -145,18 +146,20 @@ jobs:
               if m:
                   hi_digest = m[0]
                   break
-      
+          
           if hi_digest and os.path.getsize(hi_digest) > 0:
               with open(hi_digest, "r", encoding="utf-8", errors="ignore") as f:
                   parts.append("\n\n70-DAY HIGHS\n============\n" + f.read().strip())
           else:
               parts.append("\n\n70-DAY HIGHS\n============\n(hi70 scan artifact not found or empty this week)")
-      
+          
           body = "\n\n".join(parts).strip() + "\n"
           with open(out_path, "w", encoding="utf-8") as out:
               out.write(body)
           print(f"Wrote {out_path} ({len(body)} bytes)")
           PY
+
+                python _email_merge.py
       
             
             - name: Email config (from secrets)
