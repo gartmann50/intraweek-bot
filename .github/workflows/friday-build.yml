@@ -83,9 +83,6 @@ jobs:
           allow_forks: true
           if_no_artifact_found: warn        # <- don't fail the job if it’s missing
 
-      - name: Build combined email body (picks + 70D highs)
-        run: python tools/email_merge.py
-            
       - name: Email config (from secrets)
         run: |
             cat > config_notify.yaml <<'YAML'
@@ -103,55 +100,17 @@ jobs:
             to:   ${{ secrets.SMTP_TO }}
             YAML
 
-      - name: Email picks + 70D highs (single email)
+      - name: Email weekly summary (picks + 70D highs)
         env:
-          SMTP_TO:    ${{ secrets.SMTP_TO }}
-          SMTP_FROM:  ${{ secrets.SMTP_FROM }}
-          SMTP_HOST:  ${{ secrets.SMTP_HOST }}
-          SMTP_PORT:  ${{ secrets.SMTP_PORT }}   # "465" for SSL or "587" for STARTTLS (defaults to 465)
-          SMTP_USER:  ${{ secrets.SMTP_USER }}   # optional; defaults to SMTP_FROM
-          SMTP_PASS:  ${{ secrets.SMTP_PASS }}   # optional; if empty, login is skipped
-        shell: python
-        run: |
-          import os, ssl, smtplib, sys
-          from email.message import EmailMessage
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}    # "587" or "465"
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_TO:   ${{ secrets.SMTP_TO }}
+          FRIDAY:    ${{ steps.when.outputs.friday }}   # from your earlier step
+          SUBJECT:   "IW Bot — picks + 70D highs for week ${{ steps.when.outputs.friday }}"
+        run: python tools/email_weekly.py
 
-          body = r"""${{ steps.emsg.outputs.body }}"""
-
-          host = os.environ.get("SMTP_HOST", "").strip()
-          if not host:
-              sys.exit("FATAL: SMTP_HOST is empty")
-
-          port = int(os.environ.get("SMTP_PORT", "465") or "465")
-          from_addr = os.environ["SMTP_FROM"]
-          to_addr   = os.environ["SMTP_TO"]
-          user      = os.environ.get("SMTP_USER") or from_addr
-          password  = os.environ.get("SMTP_PASS", "")
-
-          msg = EmailMessage()
-          msg["Subject"] = "Weekly picks + 70D highs"
-          msg["From"]    = from_addr
-          msg["To"]      = to_addr
-          msg.set_content(body)
-
-          ctx = ssl.create_default_context()
-
-          # SSL on 465
-          if port == 465:
-              with smtplib.SMTP_SSL(host, port, context=ctx, timeout=30) as s:
-                  if password:
-                      s.login(user, password)
-                  s.send_message(msg)
-          else:
-              # Plain SMTP with optional STARTTLS (common on 587)
-              with smtplib.SMTP(host, port, timeout=30) as s:
-                  s.ehlo()
-                  if port == 587:
-                      s.starttls(context=ctx)
-                      s.ehlo()
-                  if password:
-                      s.login(user, password)
-                  s.send_message(msg)
       
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
