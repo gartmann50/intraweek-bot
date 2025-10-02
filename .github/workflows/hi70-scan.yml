@@ -54,6 +54,8 @@ jobs:
             backtests/hi70_thisweek.csv
             backtests/hi70_digest.txt
           if-no-files-found: error
+          overwrite: true
+          retention-days: 7
             
       - uses: actions/upload-artifact@v4
         with:
