@@ -307,6 +307,7 @@ def find_week_hi70(
 
 def main():
     cfg = parse_args()
+    cap_min = float(getattr(cfg, "cap_min", 0.0) or 0.0)
     global AUTH
     AUTH = {"Authorization": f"Bearer {cfg.api_key}"}
 
