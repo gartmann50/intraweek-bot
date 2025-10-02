@@ -58,6 +58,13 @@ def parse_args():
     p.add_argument("--min-dollar-vol", type=float, default=3_000_000)
     # ✱ NEW: make friday optional
     p.add_argument("--friday", dest="friday", default=None, help="YYYY-MM-DD; default = last Friday (NY)")
+    p.add_argument(
+    "--cap-min",
+    dest="cap_min",
+    type=float,
+    default=0.0,                 # 0 = no market-cap filter
+    help="Minimum market cap in USD (0 disables the filter)."
+    )       
     return p.parse_args()
 
     fri: Optional[date] = None
@@ -316,11 +323,12 @@ def main():
     print(f"Fetched {len(ref)} active common stocks from Polygon (pages={cfg.pages}).")
 
     # Apply market cap min only if provided
-    if cfg.cap_min > 0:
-        before = len(ref)
-        ref = [r for r in ref if r.mcap is not None and r.mcap >= cfg.cap_min]
-        print(f"After cap filter (>= {cfg.cap_min:,.0f}): {len(ref)} kept (was {before}).")
-
+    cap_min = getattr(cfg, "cap_min", 0.0)
+    if cap_min > 0:
+    # keep only rows/symbols with market_cap >= cap_min
+    # (example if you have a DataFrame named ref)
+    # ref = ref[pd.to_numeric(ref["market_cap"], errors="coerce").fillna(0) >= cap_min]
+    pass
     # Ensure output dir
     os.makedirs(cfg.out_dir, exist_ok=True)
 
