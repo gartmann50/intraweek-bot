@@ -1,75 +1,154 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """
-Scan for 70-day highs (no market-cap filter).
+Scan for 70-day highs made during a target week.
 
-- Universe: active U.S. common stocks (Polygon v3/reference/tickers, type=CS).
-- For each symbol, compute prior-70D high (rolling 70-high of "high", shifted by 1).
-- Check within the most recent full trading week (Mon..Fri) whether
-  any bar's high or close >= prior-70D high (two breakout flavors).
-- Rank "nearest to prior-70D high" using the latest bar in week (gap %).
-- Save:
-    backtests/hi70_thisweek.csv : all in-week breakouts with metadata
-    backtests/hi70_digest.txt   : summary + Top-10 nearest table
-
-Env/Args:
-- POLYGON_API_KEY environment variable is used by default.
-- You can pass --api-key to override, --pages for reference paging,
-  and --min-price / --min-dollar-vol for simple liquidity filters.
-
-This file intentionally avoids market_cap to keep it fast and reliable.
+- Pulls active common stocks (CS) from Polygon (paged, sorted by market cap).
+- For each symbol, downloads daily bars covering:
+    [week_start - since_days,  week_end]
+- Computes prior 70D high using bars strictly before week_start.
+- Flags symbols that make a new 70D high during [week_start .. week_end].
+- Optional filters: min price, min avg dollar volume (pre-week), market cap min.
+- Writes:
+    backtests/hi70_thisweek.csv
+    backtests/hi70_digest.txt
 """
 
 from __future__ import annotations
 
 import argparse
-import dataclasses
-import datetime as dt
-import json
-import math
+import csv
+import dataclasses as dc
+from datetime import date, datetime, timedelta, timezone
 import os
 import sys
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
-import pandas as pd
 import requests
-from zoneinfo import ZoneInfo
 
 
-# ---------- Utilities ----------
+# --------------------------
+# Utilities / configuration
+# --------------------------
 
-def log(msg: str) -> None:
-    print(msg, flush=True)
+@dc.dataclass
+class Config:
+    api_key: str
+    pages: int = 3
+    since_days: int = 150
+    top: int = 10
+    out_dir: str = "backtests"
+    min_price: float = 0.0
+    min_dollar_vol: float = 0.0
+    cap_min: float = 0.0
+    friday: Optional[date] = None
 
 
-def retry_get(url: str,
-              params: Optional[Dict] = None,
-              timeout: int = 30,
-              retries: int = 6) -> requests.Response:
-    """
-    GET with exponential backoff. Honors Polygon 429s / transient 5xx.
-    If `url` already contains query parameters (next_url), pass `params=None`.
-    """
+def parse_args() -> Config:
+    p = argparse.ArgumentParser(
+        description="Scan for 70-day highs made during a target week."
+    )
+    p.add_argument("--api-key", default=os.getenv("POLYGON_API_KEY") or os.getenv("POLY_KEY") or "",
+                   help="Polygon API key (or set POLYGON_API_KEY / POLY_KEY).")
+    p.add_argument("--pages", type=int, default=3, help="Pages of /v3/reference/tickers to load (×1000).")
+    p.add_argument("--since-days", type=int, default=150, help="Days of history before week_start to fetch.")
+    p.add_argument("--top", type=int, default=10, help="Top N rows in digest (by market cap).")
+    p.add_argument("--out-dir", default="backtests", help="Output folder.")
+    p.add_argument("--min-price", type=float, default=0.0, help="Minimum pre-week close price filter.")
+    p.add_argument("--min-dollar-vol", type=float, default=0.0, help="Minimum pre-week avg dollar volume (20 bars).")
+    p.add_argument("--cap-min", type=float, default=0.0, help="Minimum market cap (USD). 0 = disabled.")
+    p.add_argument("--friday", type=str, default="",
+                   help="Target Friday (YYYY-MM-DD). Default = last Friday in America/New_York.")
+    a = p.parse_args()
+
+    fri: Optional[date] = None
+    if a.friday:
+        fri = datetime.fromisoformat(a.friday).date()
+
+    cfg = Config(
+        api_key=a.api_key.strip(),
+        pages=int(a.pages),
+        since_days=int(a.since_days),
+        top=int(a.top),
+        out_dir=str(a.out_dir),
+        min_price=float(a.min_price),
+        min_dollar_vol=float(a.min_dollar_vol),
+        cap_min=float(a.cap_min),
+        friday=fri,
+    )
+
+    if not cfg.api_key:
+        print("FATAL: Missing Polygon API key. Use --api-key or set POLYGON_API_KEY.", file=sys.stderr)
+        sys.exit(1)
+
+    return cfg
+
+
+def last_friday_ny(today_utc: Optional[datetime] = None) -> date:
+    """Return last Friday (America/New_York)."""
+    # We do not import zoneinfo to keep dependencies minimal; Polygon uses UTC, but "week" is US trading week.
+    # We take "today" in UTC and treat weekday() on UTC; that’s perfectly fine for determining last business Friday.
+    if today_utc is None:
+        today_utc = datetime.now(timezone.utc)
+    d = today_utc.date()
+    while d.weekday() != 4:  # 0=Mon .. 4=Fri
+        d -= timedelta(days=1)
+    return d
+
+
+def monday_of_week(friday: date) -> date:
+    return friday - timedelta(days=4)
+
+
+def fmt_usd(x: Optional[float]) -> str:
+    return "-" if x is None else f"{x:,.0f}"
+
+
+def sleep_backoff(k: int):
+    time.sleep(min(1.0 * (2 ** k), 10.0))
+
+
+# --------------------------
+# HTTP helpers (Polygon)
+# --------------------------
+
+AUTH: Dict[str, str] = {}  # set in main()
+
+
+def http_get_json(url: str, params: Optional[dict] = None, timeout: int = 30, retries: int = 6) -> dict:
     for k in range(retries):
-        r = requests.get(url, params=params, timeout=timeout)
-        if r.status_code not in (429, 500, 502, 503, 504):
+        r = requests.get(url, headers=AUTH, params=params, timeout=timeout)
+        if r.status_code not in (429, 502, 503, 504):
             r.raise_for_status()
-            return r
-        sleep_s = min(0.5 * (2 ** k), 8.0)
-        time.sleep(sleep_s)
-    # last attempt
-    r.raise_for_status()
-    return r
-
-
-# ---------- Polygon helpers (no market-cap) ----------
-
-def http_get_json(url, params=None, timeout=30):
-    r = requests.get(url, params=params, headers=AUTH, timeout=timeout)
+            try:
+                return r.json() or {}
+            except Exception:
+                return {}
+        sleep_backoff(k)
+    # final try (raise if bad)
+    r = requests.get(url, headers=AUTH, params=params, timeout=timeout)
     r.raise_for_status()
     return r.json() or {}
 
-def list_common_stocks(pages=3):
+
+# --------------------------
+# Reference universe
+# --------------------------
+
+@dc.dataclass
+class RefRow:
+    symbol: str
+    name: str
+    mcap: Optional[float]
+
+
+def list_common_stocks(pages: int) -> List[RefRow]:
+    """
+    Return up to `pages`×1000 active common-stock tickers (CS) as of now,
+    descending by market cap (server-side).
+    """
     url = "https://api.polygon.io/v3/reference/tickers"
     params = {
         "market": "stocks",
@@ -79,281 +158,254 @@ def list_common_stocks(pages=3):
         "sort": "market_cap",
         "order": "desc",
     }
-    seen, out = 0, []
-    for _ in range(pages):
+    out: List[RefRow] = []
+
+    for _ in range(max(1, pages)):
         j = http_get_json(url, params=params)
-        out.extend((j.get("results") or []))
+        rows = j.get("results") or []
+        for r in rows:
+            sym = (r.get("ticker") or "").strip().upper()
+            if not sym:
+                continue
+            out.append(RefRow(
+                symbol=sym,
+                name=(r.get("name") or "").strip(),
+                mcap=float(r.get("market_cap") or 0.0) if r.get("market_cap") is not None else None,
+            ))
         nxt = j.get("next_url")
         if not nxt:
             break
-        # For next page, Polygon expects only the header; do not pass params again.
+        # next_url already encodes params
         url, params = nxt, None
     return out
 
-def fetch_daily_bars(sym: str, start: dt.date, end: dt.date, api_key: str) -> pd.DataFrame:
+
+# --------------------------
+# Bars + detection
+# --------------------------
+
+@dc.dataclass
+class Bar:
+    d: date
+    o: float
+    h: float
+    l: float
+    c: float
+    v: float
+
+
+def fetch_daily_bars(sym: str, start: date, end: date) -> List[Bar]:
     """
-    Polygon aggregates (1/day) for [start..end] inclusive.
+    Fetch daily bars (adjusted) for [start, end], ascending.
     """
     url = f"https://api.polygon.io/v2/aggs/ticker/{sym}/range/1/day/{start.isoformat()}/{end.isoformat()}"
-    params = {
-        "adjusted": "true",
-        "limit": 50000,
-        "sort": "asc",
-        "apiKey": api_key,
-    }
-    r = retry_get(url, params=params, timeout=30)
-    j = r.json() or {}
-    rows = j.get("results") or []
+    params = {"adjusted": "true", "limit": 50000, "sort": "asc"}
+    j = http_get_json(url, params=params, timeout=30)
+    res = j.get("results") or []
+    out: List[Bar] = []
+    for r in res:
+        try:
+            tms = int(r["t"])  # ms since epoch (UTC)
+            d = datetime.utcfromtimestamp(tms / 1000.0).date()
+            out.append(Bar(
+                d=d,
+                o=float(r["o"]),
+                h=float(r["h"]),
+                l=float(r["l"]),
+                c=float(r["c"]),
+                v=float(r["v"]),
+            ))
+        except Exception:
+            continue
+    return out
 
-    if not rows:
-        return pd.DataFrame(columns=["date", "open", "high", "low", "close", "volume"])
 
-    df = pd.DataFrame(rows)
-    # polygon uses ms epoch in 't'
-    df["date"] = pd.to_datetime(df["t"], unit="ms", utc=True).dt.tz_convert("America/New_York").dt.date
-    df = df.rename(columns={"o": "open", "h": "high", "l": "low", "c": "close", "v": "volume"})
-    return df[["date", "open", "high", "low", "close", "volume"]].copy()
+def avg_dollar_vol_preweek(bars: List[Bar], week_start: date, n: int = 20) -> float:
+    pre = [b for b in bars if b.d < week_start]
+    pre = pre[-n:]
+    if not pre:
+        return 0.0
+    return sum(b.c * b.v for b in pre) / len(pre)
 
 
-# ---------- Date helpers ----------
+@dc.dataclass
+class Hit:
+    symbol: str
+    name: str
+    mcap: Optional[float]
+    gap: float           # (best_high / prior70H - 1)
+    bar_date: date       # date of best bar this week
+    best_high: float
+    best_close: float
+    prior70H: float
 
-def last_completed_week(ny_today: dt.date) -> Tuple[dt.date, dt.date]:
+
+def find_week_hi70(
+    sym: str, name: str, mcap: Optional[float],
+    bars: List[Bar], week_start: date, week_end: date,
+    min_price: float, min_dollar_vol: float
+) -> Optional[Hit]:
     """
-    Return Monday..Friday of the most recent *completed* trading week in New York.
-    If today is Mon..Fri, we still use that week's Mon..Fri (so scanning is "this week" in-progress).
-    If weekend, we return the Mon..Fri of the week that ended Fri.
+    Return Hit if symbol makes a new 70D high during [week_start .. week_end]
+    relative to the prior 70D high (computed strictly on bars < week_start).
+    Applies price/volume filters based on pre-week data.
     """
-    # Use NY clock for week semantics
-    if ny_today.weekday() >= 5:   # Sat(5) or Sun(6)
-        # go back to last Friday
-        d = ny_today - dt.timedelta(days=ny_today.weekday() - 4 if ny_today.weekday() > 4 else 0)
-    else:
-        d = ny_today
-    monday = d - dt.timedelta(days=d.weekday())
-    friday = monday + dt.timedelta(days=4)
-    return monday, friday
+    if len(bars) < 80:
+        return None
 
+    # Pre-week filters
+    pre = [b for b in bars if b.d < week_start]
+    if len(pre) < 70:
+        return None
 
-# ---------- Scan core ----------
+    # price filter: last close before week
+    last_pre_close = pre[-1].c
+    if last_pre_close < min_price:
+        return None
 
-@dataclasses.dataclass
-class ScanArgs:
-    api_key: str
-    pages: int
-    since_days: int
-    top: int
-    out_dir: str
-    min_price: float
-    min_dollar_vol: float
+    if min_dollar_vol > 0.0:
+        adv = avg_dollar_vol_preweek(bars, week_start, n=20)
+        if adv < min_dollar_vol:
+            return None
 
+    # prior 70D high (strictly before week_start)
+    prior70 = max(b.h for b in pre[-70:])
 
-def compute_prior70h(df: pd.DataFrame) -> pd.Series:
-    """rolling 70-high of 'high', shifted by 1 (prior!)."""
-    s = df["high"].rolling(window=70, min_periods=70).max().shift(1)
-    return s
+    weekbars = [b for b in bars if week_start <= b.d <= week_end]
+    if not weekbars:
+        return None
 
+    # Check if any bar exceeds prior70
+    best: Optional[Tuple[Bar, float]] = None  # (bar, gap)
+    for b in weekbars:
+        if b.h > prior70:
+            g = b.h / prior70 - 1.0
+            if best is None or g > best[1]:
+                best = (b, g)
 
-def nearest_gap_pct(prior: float, value: float) -> float:
-    """gap % to prior high; clipped at >= 0."""
-    if not (prior and value and prior > 0):
-        return math.inf
-    gap = (prior - value) / prior * 100.0
-    return max(0.0, gap)
+    if best is None:
+        return None
 
-
-def main() -> None:
-    p = argparse.ArgumentParser(description="Scan 70D highs (no market-cap).")
-    p.add_argument("--api-key", type=str, default=os.getenv("POLYGON_API_KEY", ""),
-                   help="Polygon API key (defaults to POLYGON_API_KEY env)")
-    p.add_argument("--pages", type=int, default=3, help="Ticker pages (1000 per page).")
-    p.add_argument("--since-days", type=int, default=130,
-                   help="How many calendar days before week_start to start fetching bars "
-                        "(should be >= 100 to safely compute prior-70D high). Default 130.")
-    p.add_argument("--top", type=int, default=10, help="Top-N nearest to prior70H to display.")
-    p.add_argument("--out-dir", type=str, default="backtests", help="Output folder.")
-    p.add_argument("--min-price", type=float, default=0.0, help="Skip last close < this price.")
-    p.add_argument("--min-dollar-vol", type=float, default=0.0,
-                   help="Skip if ADV20 (close*volume) < this (USD).")
-    p.add_argument("--friday", type=str, default=None, help=argparse.SUPPRESS)
-    p.add_argument("--cap-min", type=float, default=None, help=argparse.SUPPRESS)
-    args = p.parse_args()
-
-    api_key = (args.api_key
-           or os.getenv("POLYGON_API_KEY")
-           or os.getenv("POLY_KEY")
-           or "").strip()
-
-    AUTH = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-  
-    if not args.api_key:
-        log("FATAL: Missing Polygon API key (set POLYGON_API_KEY or pass --api-key).")
-        sys.exit(1)
-
-    cfg = ScanArgs(
-        api_key=args.api_key,
-        pages=args.pages,
-        since_days=args.since_days,
-        top=args.top,
-        out_dir=args.out_dir,
-        min_price=args.min_price,
-        min_dollar_vol=args.min_dollar_vol,
+    b, gap = best
+    return Hit(
+        symbol=sym, name=name, mcap=mcap, gap=gap,
+        bar_date=b.d, best_high=b.h, best_close=b.c, prior70H=prior70
     )
 
-    # Determine NY week window and bar range
-    ny_now = dt.datetime.now(ZoneInfo("America/New_York")).date()
-    week_start, week_end = last_completed_week(ny_now)
 
-    # start bars earlier so rolling(70) prior exists
-    bars_start = week_start - dt.timedelta(days=cfg.since_days)
-    bars_end = week_end
+# --------------------------
+# Main
+# --------------------------
 
-    log(f"Week window: {week_start.isoformat()} .. {week_end.isoformat()} "
-        f"| bars from: {bars_start.isoformat()} .. {bars_end.isoformat()}")
+def main():
+    cfg = parse_args()
+    global AUTH
+    AUTH = {"Authorization": f"Bearer {cfg.api_key}"}
+
+    # Determine friday + week window
+    fri = cfg.friday or last_friday_ny()
+    mon = monday_of_week(fri)
+    bars_from = mon - timedelta(days=cfg.since_days)
+    print(f"Week window: {mon} .. {fri} | bars from: {bars_from} .. {fri}")
 
     # Universe
-    ref = list_common_stocks(cfg.api_key, pages=cfg.pages)
-    log(f"Fetched {len(ref)} active common stocks from Polygon (pages={cfg.pages}).")
+    ref = list_common_stocks(pages=cfg.pages)
+    print(f"Fetched {len(ref)} active common stocks from Polygon (pages={cfg.pages}).")
 
+    # Apply market cap min only if provided
+    if cfg.cap_min > 0:
+        before = len(ref)
+        ref = [r for r in ref if r.mcap is not None and r.mcap >= cfg.cap_min]
+        print(f"After cap filter (>= {cfg.cap_min:,.0f}): {len(ref)} kept (was {before}).")
+
+    # Ensure output dir
     os.makedirs(cfg.out_dir, exist_ok=True)
 
-    # Scan
-    scanned = 0
+    total = len(ref)
+    hits: List[Hit] = []
     okbars = 0
-    any_b_high = 0
-    any_b_close = 0
-    candidates_rows: List[Dict] = []
-    nearest_rows: List[Tuple[str, float, Dict]] = []  # (symbol, gap%, row dict)
 
-    N = len(ref)
-    chunk = max(200, min(200, N))  # print every ~200
-
-    for i, row in ref.iterrows():
-        sym = row["symbol"]
-        scanned += 1
+    for i, row in enumerate(ref, start=1):
+        if i % 200 == 0 or i == 1:
+            print(f"— scanned {i}/{total}; candidates so far = {len(hits)}")
 
         try:
-            df = fetch_daily_bars(sym, bars_start, bars_end, cfg.api_key)
-            if df.empty or len(df) < 75:
-                # not enough bars for prior-70H
-                if scanned % chunk == 0:
-                    log(f"  – scanned {scanned}/{N}; candidates so far = {len(candidates_rows)}")
-                continue
-
-            okbars += 1
-
-            # basic liquidity screens
-            last_close = float(df.iloc[-1]["close"])
-            if cfg.min_price and last_close < cfg.min_price:
-                if scanned % chunk == 0:
-                    log(f"  – scanned {scanned}/{N}; candidates so far = {len(candidates_rows)}")
-                continue
-
-            if cfg.min_dollar_vol:
-                adv20 = float((df.tail(20)["close"] * df.tail(20)["volume"]).mean())
-                if adv20 < cfg.min_dollar_vol:
-                    if scanned % chunk == 0:
-                        log(f"  – scanned {scanned}/{N}; candidates so far = {len(candidates_rows)}")
-                    continue
-
-            df["prior70H"] = compute_prior70h(df)
-
-            # keep just week rows
-            wmask = (df["date"] >= week_start) & (df["date"] <= week_end)
-            wdf = df.loc[wmask].copy()
-            if wdf.empty:
-                if scanned % chunk == 0:
-                    log(f"  – scanned {scanned}/{N}; candidates so far = {len(candidates_rows)}")
-                continue
-
-            # in-week breakouts
-            wdf["b_high"] = (wdf["high"] >= wdf["prior70H"])
-            wdf["b_close"] = (wdf["close"] >= wdf["prior70H"])
-
-            broke_high = bool(wdf["b_high"].fillna(False).any())
-            broke_close = bool(wdf["b_close"].fillna(False).any())
-            if broke_high:
-                any_b_high += 1
-            if broke_close:
-                any_b_close += 1
-
-            if broke_high or broke_close:
-                # record all in-week breakout rows with some context
-                for _, r in wdf.loc[(wdf["b_high"] | wdf["b_close"]).fillna(False)].iterrows():
-                    candidates_rows.append({
-                        "symbol": sym,
-                        "date": r["date"],
-                        "close": float(r["close"]),
-                        "high": float(r["high"]),
-                        "prior70H": float(r["prior70H"]) if pd.notna(r["prior70H"]) else None,
-                        "break_high": bool(r["b_high"]),
-                        "break_close": bool(r["b_close"]),
-                    })
-
-            # “nearest” uses the **latest** bar in week for this symbol
-            last_w = wdf.dropna(subset=["prior70H"]).iloc[-1:]  # tail(1) but ensures prior exists
-            if not last_w.empty:
-                prior = float(last_w["prior70H"].iloc[0])
-                gap = nearest_gap_pct(prior, float(last_w["close"].iloc[0]))
-                # keep small gap (near prior) even if no breakout, for ranking table
-                nearest_rows.append((
-                    sym,
-                    gap,
-                    {
-                        "symbol": sym,
-                        "gap_pct": gap,
-                        "date": last_w["date"].iloc[0],
-                        "close": float(last_w["close"].iloc[0]),
-                        "high": float(last_w["high"].iloc[0]),
-                        "prior70H": prior,
-                    }
-                ))
-
+            bars = fetch_daily_bars(row.symbol, bars_from, fri)
         except Exception as e:
-            # Keep going if a single symbol fails
-            if scanned % chunk == 0:
-                log(f"  – scanned {scanned}/{N}; candidates so far = {len(candidates_rows)}")
+            # soft-fail per symbol
             continue
 
-        if scanned % chunk == 0:
-            log(f"  – scanned {scanned}/{N}; candidates so far = {len(candidates_rows)}")
+        if len(bars) >= 70:
+            okbars += 1
 
-    # ---------- Output ----------
-
-    # candidates CSV
-    cand_df = pd.DataFrame(candidates_rows)
-    cand_df = cand_df.sort_values(["date", "symbol"]).reset_index(drop=True)
-    out_csv = os.path.join(cfg.out_dir, "hi70_thisweek.csv")
-    cand_df.to_csv(out_csv, index=False)
-
-    # top nearest
-    nearest_rows = [x for x in nearest_rows if math.isfinite(x[1])]
-    nearest_rows.sort(key=lambda x: (x[1], x[0]))  # by gap %, then symbol
-    topK = nearest_rows[: cfg.top]
-
-    # human digest
-    digest_lines: List[str] = []
-    digest_lines.append(f"[hi70][dbg] SUMMARY: scanned={scanned} | okbars={okbars} | "
-                        f"any_breakout(high)={any_b_high} | any_breakout(close)={any_b_close}")
-    digest_lines.append(f"[hi70][dbg] Top-{cfg.top} nearest to prior-70D HIGH (gap %):")
-    for sym, gap, info in topK:
-        digest_lines.append(
-            f"  {sym:<6}  gap= {gap:>6.2f}%  "
-            f"date={info['date']}  close={info['close']:.2f}  "
-            f"high={info['high']:.2f}  prior70H={info['prior70H']:.2f}"
+        h = find_week_hi70(
+            row.symbol, row.name, row.mcap, bars, mon, fri,
+            min_price=cfg.min_price, min_dollar_vol=cfg.min_dollar_vol
         )
+        if h:
+            hits.append(h)
 
-    out_txt = os.path.join(cfg.out_dir, "hi70_digest.txt")
-    with open(out_txt, "w", encoding="utf-8") as f:
-        f.write("\n".join(digest_lines) + "\n")
+    # Summary
+    any_break_high = sum(1 for _ in hits)
+    print(f"[hi70][dbg] SUMMARY: scanned={total} | okbars={okbars} | any_breakout(high)={any_break_high}")
 
-    # log tail
-    for ln in digest_lines[:2]:
-        log(ln)
-    for ln in digest_lines[2: 2 + cfg.top]:
-        log(ln)
+    # Sort by market cap desc (None goes last), then by gap desc
+    def _sort_key(h: Hit):
+        mc = h.mcap if h.mcap is not None else -1.0
+        return (mc, h.gap)
 
-    log(f"Wrote: {out_txt}")
-    log(f"Wrote: {out_csv}")
+    hits_sorted = sorted(hits, key=_sort_key, reverse=True)
+
+    # Write CSV
+    csv_path = os.path.join(cfg.out_dir, "hi70_thisweek.csv")
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow([
+            "symbol", "name", "market_cap", "bar_date",
+            "prior70H", "best_high", "best_close", "gap_pct",
+            "week_start", "week_end"
+        ])
+        for h in hits_sorted:
+            w.writerow([
+                h.symbol,
+                h.name,
+                f"{h.mcap:.0f}" if h.mcap is not None else "",
+                h.bar_date.isoformat(),
+                f"{h.prior70H:.2f}",
+                f"{h.best_high:.2f}",
+                f"{h.best_close:.2f}",
+                f"{100.0 * h.gap:.2f}",
+                mon.isoformat(),
+                fri.isoformat(),
+            ])
+
+    # Write digest (text) + print top-N
+    digest_path = os.path.join(cfg.out_dir, "hi70_digest.txt")
+    topN = hits_sorted[: cfg.top]
+    with open(digest_path, "w", encoding="utf-8") as f:
+        f.write(f"Candidates that made a 70D high this week: {len(hits_sorted)}\n\n")
+        f.write("Top-{n} by market cap:\n".format(n=len(topN)))
+        f.write("symbol  mcap    prior70H  high      gap%   date\n")
+        for h in topN:
+            f.write(
+                f"{h.symbol:<6} {fmt_usd(h.mcap):>8}  {h.prior70H:>8.2f}  {h.best_high:>8.2f}  "
+                f"{100.0 * h.gap:>6.2f}  {h.bar_date.isoformat()}\n"
+            )
+
+    # Console preview (same topN)
+    if topN:
+        print("\n[hi70][dbg] Top-{N} nearest to prior-70D HIGH (by mcap):".format(N=len(topN)))
+        print(f"{'SYM':<6} {'mcap':>8}   {'prior70H':>8}  {'high':>8}  {'gap%':>6}  {'date':>10}")
+        for h in topN:
+            print(
+                f"{h.symbol:<6} {fmt_usd(h.mcap):>8}   {h.prior70H:>8.2f}  {h.best_high:>8.2f}  "
+                f"{100.0 * h.gap:>6.2f}  {h.bar_date.isoformat():>10}"
+            )
+    else:
+        print("No candidates hit a new 70D high this week.")
+
+    print(f"\nWrote: {csv_path}")
+    print(f"Wrote: {digest_path}")
 
 
 if __name__ == "__main__":
