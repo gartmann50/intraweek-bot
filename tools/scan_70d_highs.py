@@ -178,6 +178,8 @@ def main() -> None:
     p.add_argument("--min-price", type=float, default=0.0, help="Skip last close < this price.")
     p.add_argument("--min-dollar-vol", type=float, default=0.0,
                    help="Skip if ADV20 (close*volume) < this (USD).")
+    p.add_argument("--friday", type=str, default=None, help=argparse.SUPPRESS)
+    p.add_argument("--cap-min", type=float, default=None, help=argparse.SUPPRESS)
     args = p.parse_args()
 
     if not args.api_key:
