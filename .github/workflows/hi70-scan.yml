@@ -19,18 +19,19 @@ jobs:
       - run: |
           python -m pip install --upgrade pip
           pip install pandas requests pyyaml
-      - name: Compute last Friday (Europe/Oslo)
+      - name: Compute last Friday (NY)
         id: when
         shell: python
         run: |
           from datetime import datetime, timedelta
-          import zoneinfo, os
-          tz = zoneinfo.ZoneInfo("Europe/Oslo")
-          d = datetime.now(tz).date()
-          while d.weekday()!=4: d -= timedelta(days=1)
-          with open(os.environ["GITHUB_OUTPUT"],"a") as f:
-            f.write(f"friday={d.isoformat()}\n")
+          from zoneinfo import ZoneInfo
+          ny = ZoneInfo("America/New_York")
+          d = datetime.now(ny).date()
+          while d.weekday() != 4:  # 4 = Friday
+              d -= timedelta(days=1)
           print("FRIDAY:", d)
+          with open("${{ github.output }}", "w") as f:
+              f.write(f"friday={d}\n")
       
       - name: Upload 70D-highs artifact
         uses: actions/upload-artifact@v4
