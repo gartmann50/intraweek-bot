@@ -84,93 +84,97 @@ jobs:
           if_no_artifact_found: warn        # <- don't fail the job if it’s missing
 
       - name: Build combined email body (picks + 70D highs)
-        id: emsg
         shell: bash
         run: |
           python - <<'PY'
-          import os, csv
-
-          def exists(p):
-              try:
-                  return os.path.exists(p)
-              except Exception:
-                  return False
-
-          def to_float(x, default=0.0):
-               try:
-                   return float(x)
-              except Exception:
-                  return default
-
-          lines = []
-
-          # Optional preview of weekly picks if you produce it elsewhere
-          preview = "backtests/top6_preview.txt"
-          if exists(preview):
-              lines.append("== Weekly Top-K Preview ==")
-              with open(preview, "r", encoding="utf-8") as f:
-                  lines.append(f.read().strip())
-              lines.append("")
-
-          lines.append("== 70D High Breakouts ==")
-          csv_path    = "backtests/hi70_thisweek.csv"
-          digest_path = "backtests/hi70_digest.txt"
-
-          if exists(csv_path):
-              with open(csv_path, newline="", encoding="utf-8") as f:
-                  rows = list(csv.DictReader(f))
-              if rows:
-                  # Keep top 10 by market cap (defensive: sort here too)
-                  rows = sorted(rows, key=lambda r: to_float(r.get("market_cap")), reverse=True)[:10]
-                  lines.append("Top 10 by market cap:")
-                  for r in rows:
-                      sym   = (r.get("symbol") or "?").strip()
-                      cap   = to_float(r.get("market_cap"))
-                      prior = to_float(r.get("prior70h"))
-                      wh    = to_float(r.get("week_high"))
-                      wc    = to_float(r.get("week_close"))
-                      gh    = to_float(r.get("gap_high_pct"))
-                      gc    = to_float(r.get("gap_close_pct"))
-                      first = r.get("first_break_day") or "-"
-                      lines.append(
-                          f"- {sym:<6} cap=${cap:,.0f} prior70H={prior:.2f} "
-                          f"high={wh:.2f} close={wc:.2f} gap(max)={max(gh,gc):.2f}% first={first}"
-                      )
-              else:
-                  lines.append("No 70D breakouts this week.")
-          elif exists(digest_path):
-              with open(digest_path, "r", encoding="utf-8") as f:
-                  lines.append(f.read().strip())
-          else:
-              lines.append("No 70D scan artifact found (workflow might not have run yet).")
-
-          body = "\n".join(lines).strip() + "\n"
-          print(body)
-
-          # pass body to later steps
-          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as fh:
-              fh.write("body<<__EOT__\n")
-              fh.write(body)
-              fh.write("\n__EOT__\n")
-          PY
-
+          import os, sys, csv, glob, io
       
-      - name: Email config (from secrets)
-        run: |
-          cat > config_notify.yaml <<'YAML'
-          # primary keys
-          smtp_user: ${{ secrets.SMTP_USER }}
-          smtp_pass: ${{ secrets.SMTP_PASS }}
-          smtp_from: ${{ secrets.SMTP_FROM }}
-          smtp_to:   ${{ secrets.SMTP_TO }}
-          host: smtp.gmail.com
-          port: 587
-          use_tls: true
-
-          # aliases some scripts expect
-          from: ${{ secrets.SMTP_FROM }}
-          to:   ${{ secrets.SMTP_TO }}
-          YAML
+          out_path = "email_body.txt"
+          parts = []
+      
+          # ------- Picks section (try a few common files/artifacts) -------
+          picks_txt = None
+          for pat in (
+              "backtests/top6_preview.txt",
+              "backtests/top6_preview.md",
+              "backtests/weekly-picks-*.txt",
+              "backtests/weekly_picks_*.txt",
+          ):
+              m = glob.glob(pat)
+              if m:
+                  picks_txt = m[0]
+                  break
+      
+          if picks_txt and os.path.getsize(picks_txt) > 0:
+              with open(picks_txt, "r", encoding="utf-8", errors="ignore") as f:
+                  parts.append("WEEKLY PICKS\n=============\n" + f.read().strip())
+          else:
+              # Fall back to a CSV view if a text preview isn't present
+              picks_csv = None
+              for pat in (
+                  "backtests/picklist_highrsi_trend.csv",
+                  "backtests/weekly-picks-*.csv",
+              ):
+                  m = glob.glob(pat)
+                  if m:
+                      picks_csv = m[0]
+                      break
+              if picks_csv and os.path.getsize(picks_csv) > 0:
+                  buf = io.StringIO()
+                  buf.write("WEEKLY PICKS (from CSV)\n=======================\n")
+                  try:
+                      with open(picks_csv, newline="", encoding="utf-8") as f:
+                          r = csv.reader(f)
+                          hdr = next(r, [])
+                          # show up to 10 rows for the email body
+                          for _ in range(10):
+                              row = next(r, None)
+                              if row is None:
+                                  break
+                              buf.write(", ".join(row) + "\n")
+                  except Exception as e:
+                      buf.write(f"(could not read {picks_csv}: {e})\n")
+                  parts.append(buf.getvalue())
+              else:
+                  parts.append("WEEKLY PICKS\n=============\n(no picks preview found)")
+      
+          # ------- 70D highs section -------
+          hi_digest = None
+          for pat in ("backtests/hi70_digest.txt", "backtests/hi70/hi70_digest.txt"):
+              m = glob.glob(pat)
+              if m:
+                  hi_digest = m[0]
+                  break
+      
+          if hi_digest and os.path.getsize(hi_digest) > 0:
+              with open(hi_digest, "r", encoding="utf-8", errors="ignore") as f:
+                  parts.append("\n\n70-DAY HIGHS\n============\n" + f.read().strip())
+          else:
+              parts.append("\n\n70-DAY HIGHS\n============\n(hi70 scan artifact not found or empty this week)")
+      
+          body = "\n\n".join(parts).strip() + "\n"
+          with open(out_path, "w", encoding="utf-8") as out:
+              out.write(body)
+          print(f"Wrote {out_path} ({len(body)} bytes)")
+          PY
+      
+            
+            - name: Email config (from secrets)
+              run: |
+                cat > config_notify.yaml <<'YAML'
+                # primary keys
+                smtp_user: ${{ secrets.SMTP_USER }}
+                smtp_pass: ${{ secrets.SMTP_PASS }}
+                smtp_from: ${{ secrets.SMTP_FROM }}
+                smtp_to:   ${{ secrets.SMTP_TO }}
+                host: smtp.gmail.com
+                port: 587
+                use_tls: true
+      
+                # aliases some scripts expect
+                from: ${{ secrets.SMTP_FROM }}
+                to:   ${{ secrets.SMTP_TO }}
+                YAML
 
       - name: Email picks + 70D highs (single email)
         env:
