@@ -31,6 +31,17 @@ jobs:
           with open(os.environ["GITHUB_OUTPUT"],"a") as f:
             f.write(f"friday={d.isoformat()}\n")
           print("FRIDAY:", d)
+      
+      - name: Upload 70D-highs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hi70-${{ steps.when.outputs.friday }}
+          path: |
+            backtests/hi70_thisweek.csv
+            backtests/hi70_digest.txt
+          if-no-files-found: error
+      
+      
       - name: Scan 70D highs (≥$1B)
         env:
           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
