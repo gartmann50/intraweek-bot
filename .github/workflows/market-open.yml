@@ -1,15 +1,15 @@
 name: IW Bot — Market Open
 
-#on:
-#  schedule:
- #   - cron: "25 12 * * 1-5"   # pre-open (EST)
- #   - cron: "25 13 * * 1-5"   # pre-open (EDT)
- # workflow_dispatch:
- #   inputs:
- #     force_buy:
- #       description: "Force weekly buy now"
-  #      type: boolean
-  #      default: false
+on:
+ schedule:
+   - cron: "25 12 * * 1-5"   # pre-open (EST)
+   - cron: "25 13 * * 1-5"   # pre-open (EDT)
+ workflow_dispatch:
+   inputs:
+     force_buy:
+       description: "Force weekly buy now"
+       type: boolean
+       default: false
 
 concurrency:
   group: iwbot-open
