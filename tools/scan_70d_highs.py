@@ -171,7 +171,7 @@ class Candidate:
     first_break_day: str  # YYYY-MM-DD or ""
     bars: int
 
-def detect_week_breakout(bars: List[Dict], mon: date, fri: date) -> Tuple[float, float, float, float, str]:
+def detect_week_breakout(bars: List[Dict], mon: date, week_end: date) -> Tuple[float, float, float, float, str]:
     """
     Given Polygon 'bars' (list of dicts) sorted asc by time,
     compute:
@@ -302,7 +302,7 @@ def main() -> None:
 
         # Fetch bars
         try:
-            bars = fetch_daily_bars(api_key, sym, start, fri)
+            bars = fetch_daily_bars(api_key, sym, start, end)
         except Exception as e:
             # Skip if API error
             continue
@@ -322,7 +322,7 @@ def main() -> None:
         if float(cfg.cap_min or 0.0) > 0 and float(mc or 0.0) < float(cfg.cap_min):
             continue
 
-        prior70h, week_high, week_close, gap_pct, first_day = detect_week_breakout(bars, mon, fri)
+        prior70h, week_high, week_close, gap_pct, first_day = detect_week_breakout(bars, mon, week_end)
         if prior70h <= 0:
             continue
 
