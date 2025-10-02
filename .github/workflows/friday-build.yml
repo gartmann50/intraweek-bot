@@ -156,32 +156,27 @@ jobs:
 
       - name: Email picks + 70D highs (single email)
         env:
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
-          SMTP_FROM: ${{ secrets.SMTP_FROM }}
           SMTP_TO:   ${{ secrets.SMTP_TO }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}   # if you use auth
+        shell: python
         run: |
-          python - <<'PY'
           import os, ssl, smtplib
-          from email.mime.text import MIMEText
-          from email.utils import formatdate
+          from email.message import EmailMessage
 
-          to = [s.strip() for s in os.environ["SMTP_TO"].replace(";", ",").split(",") if s.strip()]
-          with open("backtests/email_body.txt", "r", encoding="utf-8") as f:
-              body = f.read()
+          body = r"""${{ steps.emsg.outputs.body }}"""
 
-          msg = MIMEText(body, "plain", "utf-8")
+          msg = EmailMessage()
           msg["Subject"] = "Weekly picks + 70D highs"
-          msg["From"] = os.environ["SMTP_FROM"]
-          msg["To"] = ", ".join(to)
-          msg["Date"] = formatdate(localtime=True)
+          msg["From"]    = os.environ["SMTP_FROM"]
+          msg["To"]      = os.environ["SMTP_TO"]
+          msg.set_content(body)
 
-          ctx = ssl.create_default_context()
-          with smtplib.SMTP("smtp.gmail.com", 587) as s:
-              s.starttls(context=ctx)
-              s.login(os.environ["SMTP_USER"], os.environ["SMTP_PASS"])
-              s.sendmail(os.environ["SMTP_FROM"], to, msg.as_string())
-          PY
+          with smtplib.SMTP_SSL(os.environ["SMTP_HOST"], 465, context=ssl.create_default_context()) as s:
+              if os.getenv("SMTP_PASS"):
+                  s.login(os.environ["SMTP_FROM"], os.environ["SMTP_PASS"])
+              s.send_message(msg)
       
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
