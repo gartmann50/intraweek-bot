@@ -262,7 +262,8 @@ def main() -> None:
     else:
         fri = last_friday_ny()
 
-    mon = fri + timedelta(days=3)               # Monday after last Friday
+    fri_anchor = last_friday_ny()             # Monday after last Friday
+    mon = fri_anchor + timedelta(days=3)
     week_end = mon + timedelta(days=4)          # the following Friday (Mon..Fri)
     today_ny = datetime.now(NY).date()
     if week_end > today_ny:
