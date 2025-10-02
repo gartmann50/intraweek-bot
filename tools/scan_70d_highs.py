@@ -64,35 +64,31 @@ def retry_get(url: str,
 
 # ---------- Polygon helpers (no market-cap) ----------
 
-def list_common_stocks(api_key: str, pages: int = 3) -> pd.DataFrame:
-    """
-    Return up to pages*1000 active US common stocks (type=CS).
-    Only the ticker/symbol is required here.
-    """
-    base = "https://api.polygon.io/v3/reference/tickers"
-    out = []
-    next_url = None
-    for _ in range(pages):
-        params = {
-            "market": "stocks",
-            "type": "CS",
-            "active": "true",
-            "limit": 1000,
-            "sort": "ticker",
-            "apiKey": api_key,
-        }
-        url = next_url or base
-        r = retry_get(url, params=None if next_url else params, timeout=30)
-        j = r.json() or {}
-        for row in j.get("results") or []:
-            sym = (row.get("ticker") or "").upper().strip()
-            if sym:
-                out.append({"symbol": sym})
-        next_url = j.get("next_url")
-        if not next_url:
-            break
-    return pd.DataFrame(out).drop_duplicates(subset=["symbol"]).reset_index(drop=True)
+def http_get_json(url, params=None, timeout=30):
+    r = requests.get(url, params=params, headers=AUTH, timeout=timeout)
+    r.raise_for_status()
+    return r.json() or {}
 
+def list_common_stocks(pages=3):
+    url = "https://api.polygon.io/v3/reference/tickers"
+    params = {
+        "market": "stocks",
+        "active": "true",
+        "type": "CS",
+        "limit": 1000,
+        "sort": "market_cap",
+        "order": "desc",
+    }
+    seen, out = 0, []
+    for _ in range(pages):
+        j = http_get_json(url, params=params)
+        out.extend((j.get("results") or []))
+        nxt = j.get("next_url")
+        if not nxt:
+            break
+        # For next page, Polygon expects only the header; do not pass params again.
+        url, params = nxt, None
+    return out
 
 def fetch_daily_bars(sym: str, start: dt.date, end: dt.date, api_key: str) -> pd.DataFrame:
     """
@@ -182,6 +178,13 @@ def main() -> None:
     p.add_argument("--cap-min", type=float, default=None, help=argparse.SUPPRESS)
     args = p.parse_args()
 
+    api_key = (args.api_key
+           or os.getenv("POLYGON_API_KEY")
+           or os.getenv("POLY_KEY")
+           or "").strip()
+
+    AUTH = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+  
     if not args.api_key:
         log("FATAL: Missing Polygon API key (set POLYGON_API_KEY or pass --api-key).")
         sys.exit(1)
