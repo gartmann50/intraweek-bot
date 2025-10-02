@@ -324,10 +324,10 @@ def main():
 
     # Apply market cap min only if provided
     cap_min = getattr(cfg, "cap_min", 0.0)
-    if cap_min > 0:
-    # keep only rows/symbols with market_cap >= cap_min
-    # (example if you have a DataFrame named ref)
-    # ref = ref[pd.to_numeric(ref["market_cap"], errors="coerce").fillna(0) >= cap_min]
+if cap_min > 0:
+        # keep only rows/symbols with market_cap >= cap_min
+        # (example if you have a DataFrame named ref)
+        # ref = ref[pd.to_numeric(ref["market_cap"], errors="coerce").fillna(0) >= cap_min]
     pass
     # Ensure output dir
     os.makedirs(cfg.out_dir, exist_ok=True)
