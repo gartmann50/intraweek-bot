@@ -84,100 +84,24 @@ jobs:
           if_no_artifact_found: warn        # <- don't fail the job if it’s missing
 
       - name: Build combined email body (picks + 70D highs)
-        shell: bash
-        run: |
-          set -euo pipefail
-      
-          # Write Python to a file (avoids heredoc delimiter/indent issues)
-          cat > _email_merge.py <<'PY'
-          import os, sys, csv, glob, io
-          
-          out_path = "email_body.txt"
-          parts = []
-          
-          # ------- Picks section (try a few common files/artifacts) -------
-          picks_txt = None
-          for pat in (
-              "backtests/top6_preview.txt",
-              "backtests/top6_preview.md",
-              "backtests/weekly-picks-*.txt",
-              "backtests/weekly_picks_*.txt",
-          ):
-              m = glob.glob(pat)
-              if m:
-                  picks_txt = m[0]
-                  break
-          
-          if picks_txt and os.path.getsize(picks_txt) > 0:
-              with open(picks_txt, "r", encoding="utf-8", errors="ignore") as f:
-                  parts.append("WEEKLY PICKS\n=============\n" + f.read().strip())
-          else:
-              picks_csv = None
-              for pat in (
-                  "backtests/picklist_highrsi_trend.csv",
-                  "backtests/weekly-picks-*.csv",
-              ):
-                  m = glob.glob(pat)
-                  if m:
-                      picks_csv = m[0]
-                      break
-              if picks_csv and os.path.getsize(picks_csv) > 0:
-                  buf = io.StringIO()
-                  buf.write("WEEKLY PICKS (from CSV)\n=======================\n")
-                  try:
-                      with open(picks_csv, newline="", encoding="utf-8") as f:
-                          r = csv.reader(f)
-                          _hdr = next(r, [])
-                          for _ in range(10):
-                              row = next(r, None)
-                              if row is None:
-                                  break
-                              buf.write(", ".join(row) + "\n")
-                  except Exception as e:
-                      buf.write(f"(could not read {picks_csv}: {e})\n")
-                  parts.append(buf.getvalue())
-              else:
-                  parts.append("WEEKLY PICKS\n=============\n(no picks preview found)")
-          
-          # ------- 70D highs section -------
-          hi_digest = None
-          for pat in ("backtests/hi70_digest.txt", "backtests/hi70/hi70_digest.txt"):
-              m = glob.glob(pat)
-              if m:
-                  hi_digest = m[0]
-                  break
-          
-          if hi_digest and os.path.getsize(hi_digest) > 0:
-              with open(hi_digest, "r", encoding="utf-8", errors="ignore") as f:
-                  parts.append("\n\n70-DAY HIGHS\n============\n" + f.read().strip())
-          else:
-              parts.append("\n\n70-DAY HIGHS\n============\n(hi70 scan artifact not found or empty this week)")
-          
-          body = "\n\n".join(parts).strip() + "\n"
-          with open(out_path, "w", encoding="utf-8") as out:
-              out.write(body)
-          print(f"Wrote {out_path} ({len(body)} bytes)")
-          PY
-
-                python _email_merge.py
-      
+        run: python tools/email_merge.py
             
-            - name: Email config (from secrets)
-              run: |
-                cat > config_notify.yaml <<'YAML'
-                # primary keys
-                smtp_user: ${{ secrets.SMTP_USER }}
-                smtp_pass: ${{ secrets.SMTP_PASS }}
-                smtp_from: ${{ secrets.SMTP_FROM }}
-                smtp_to:   ${{ secrets.SMTP_TO }}
-                host: smtp.gmail.com
-                port: 587
-                use_tls: true
+      - name: Email config (from secrets)
+        run: |
+            cat > config_notify.yaml <<'YAML'
+             # primary keys
+            smtp_user: ${{ secrets.SMTP_USER }}
+             smtp_pass: ${{ secrets.SMTP_PASS }}
+            smtp_from: ${{ secrets.SMTP_FROM }}
+             smtp_to:   ${{ secrets.SMTP_TO }}
+             host: smtp.gmail.com
+             port: 587
+            use_tls: true
       
-                # aliases some scripts expect
-                from: ${{ secrets.SMTP_FROM }}
-                to:   ${{ secrets.SMTP_TO }}
-                YAML
+             # aliases some scripts expect
+            from: ${{ secrets.SMTP_FROM }}
+            to:   ${{ secrets.SMTP_TO }}
+            YAML
 
       - name: Email picks + 70D highs (single email)
         env:
