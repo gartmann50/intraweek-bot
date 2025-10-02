@@ -46,22 +46,17 @@ class Config:
     friday: Optional[date] = None
 
 
-def parse_args() -> Config:
-    p = argparse.ArgumentParser(
-        description="Scan for 70-day highs made during a target week."
-    )
-    p.add_argument("--api-key", default=os.getenv("POLYGON_API_KEY") or os.getenv("POLY_KEY") or "",
-                   help="Polygon API key (or set POLYGON_API_KEY / POLY_KEY).")
-    p.add_argument("--pages", type=int, default=3, help="Pages of /v3/reference/tickers to load (×1000).")
-    p.add_argument("--since-days", type=int, default=150, help="Days of history before week_start to fetch.")
-    p.add_argument("--top", type=int, default=10, help="Top N rows in digest (by market cap).")
-    p.add_argument("--out-dir", default="backtests", help="Output folder.")
-    p.add_argument("--min-price", type=float, default=0.0, help="Minimum pre-week close price filter.")
-    p.add_argument("--min-dollar-vol", type=float, default=0.0, help="Minimum pre-week avg dollar volume (20 bars).")
-    p.add_argument("--cap-min", type=float, default=0.0, help="Minimum market cap (USD). 0 = disabled.")
-    p.add_argument("--friday", type=str, default="",
-                   help="Target Friday (YYYY-MM-DD). Default = last Friday in America/New_York.")
-    a = p.parse_args()
+def parse_args():
+    import os, argparse
+    p = argparse.ArgumentParser()
+    p.add_argument("--api-key", dest="api_key", default=os.getenv("POLYGON_API_KEY"))
+    p.add_argument("--pages", type=int, default=3)
+    p.add_argument("--since-days", type=int, default=130)
+    p.add_argument("--top", type=int, default=10)
+    p.add_argument("--out-dir", default="backtests")
+    p.add_argument("--min-price", type=float, default=5.0)
+    p.add_argument("--min-dollar-vol", type=float, default=3_000_000)
+    return p.parse_args()
 
     fri: Optional[date] = None
     if a.friday:
@@ -313,7 +308,7 @@ def main():
     print(f"Week window: {mon} .. {fri} | bars from: {bars_from} .. {fri}")
 
     # Universe
-    ref = list_common_stocks(pages=cfg.pages)
+    ref = list_common_stocks(api_key=cfg.api_key, pages=cfg.pages)
     print(f"Fetched {len(ref)} active common stocks from Polygon (pages={cfg.pages}).")
 
     # Apply market cap min only if provided
