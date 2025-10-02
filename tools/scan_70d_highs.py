@@ -262,7 +262,7 @@ def main() -> None:
     else:
         fri = last_friday_ny()
 
-    fri_anchor = last_friday_ny()             # Monday after last Friday
+    fri_anchor = fri            # Monday after last Friday
     mon = fri_anchor + timedelta(days=3)
     week_end = mon + timedelta(days=4)          # the following Friday (Mon..Fri)
     today_ny = datetime.now(NY).date()
@@ -273,7 +273,7 @@ def main() -> None:
 
     os.makedirs(cfg.out_dir, exist_ok=True)
 
-    print(f"Week window: {ymd(mon)} .. {ymd(fri)} | bars from: {ymd(start)} .. {ymd(fri)}")
+    print(f"Week window: {ymd(mon)} .. {ymd(week_end)} | bars from: {ymd(start)} .. {ymd(week_end)}")
     print(f"Fetching tickers (pages={cfg.pages})…")
 
     tickers = list_common_stocks(api_key, pages=cfg.pages, on_date=fri)
@@ -390,7 +390,7 @@ def main() -> None:
     # Digest TXT
     digest_path = os.path.join(cfg.out_dir, "hi70_digest.txt")
     with open(digest_path, "w", encoding="utf-8") as f:
-        f.write(f"hi70 scan — week {ymd(mon)} .. {ymd(fri)}\n")
+        f.write(f"hi70 scan — week {ymd(mon)} .. {ymd(week_end)}\n")
         f.write(f"symbols scanned: {total}\n")
         f.write(f"candidates found: {len(cands)}\n")
         f.write(f"top {min(len(topN), int(cfg.top or 10))} by market cap:\n\n")
