@@ -144,40 +144,44 @@ class RefRow:
     mcap: Optional[float]
 
 
-def list_common_stocks(pages: int) -> List[RefRow]:
-    """
-    Return up to `pages`×1000 active common-stock tickers (CS) as of now,
-    descending by market cap (server-side).
-    """
+def list_common_stocks(api_key: str, pages: int = 3) -> list[str]:
+    import requests, time
+
     url = "https://api.polygon.io/v3/reference/tickers"
     params = {
         "market": "stocks",
         "active": "true",
         "type": "CS",
         "limit": 1000,
-        "sort": "market_cap",
-        "order": "desc",
+        # REMOVE the invalid sort:
+        # "sort": "market_cap",
+        # "order": "desc",
     }
-    out: List[RefRow] = []
 
-    for _ in range(max(1, pages)):
-        j = http_get_json(url, params=params)
-        rows = j.get("results") or []
-        for r in rows:
-            sym = (r.get("ticker") or "").strip().upper()
-            if not sym:
-                continue
-            out.append(RefRow(
-                symbol=sym,
-                name=(r.get("name") or "").strip(),
-                mcap=float(r.get("market_cap") or 0.0) if r.get("market_cap") is not None else None,
-            ))
-        nxt = j.get("next_url")
-        if not nxt:
+    tickers = []
+    next_url = url
+    for _ in range(max(1, int(pages))):
+        r = requests.get(next_url, params={**params, "apiKey": api_key}, timeout=30)
+        # Fallback if any future invalid param slips in:
+        if r.status_code == 400:
+            # retry once without any client-side sort/order
+            params.pop("sort", None)
+            params.pop("order", None)
+            r = requests.get(url, params={**params, "apiKey": api_key}, timeout=30)
+        r.raise_for_status()
+
+        j = r.json() or {}
+        for row in j.get("results", []) or []:
+            t = (row.get("ticker") or "").strip()
+            if t:
+                tickers.append(t)
+
+        next_url = j.get("next_url")
+        if not next_url:
             break
-        # next_url already encodes params
-        url, params = nxt, None
-    return out
+        time.sleep(0.05)
+
+    return tickers
 
 
 # --------------------------
