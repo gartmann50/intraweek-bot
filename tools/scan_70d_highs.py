@@ -71,26 +71,32 @@ def list_common_stocks(
     Returns a list of reference ticker dicts from Polygon with fields including:
       - ticker
       - market_cap (populated when date= is supplied)
-    We query market=stocks, type=CS, active=true.
+    We query market=stocks, type=CS, active=true. Pagination is handled via the
+    'cursor' parameter extracted from 'next_url'.
     """
-    url = "https://api.polygon.io/v3/reference/tickers"
+    base = "https://api.polygon.io/v3/reference/tickers"
     out: List[dict] = []
-    next_url: Optional[str] = None
+    cursor: Optional[str] = None
 
-    for p in range(pages):
-        params = {
-            "market": "stocks",
-            "type": "CS",
-            "active": "true",
-            "sort": "ticker",
-            "order": "asc",
-            "limit": "1000",
-            "apiKey": api_key,
-        }
-        if asof_date:
-            params["date"] = asof_date
+    for _ in range(pages):
+        if cursor:
+            # follow-on pages: only need cursor + apiKey
+            params = {"cursor": cursor, "apiKey": api_key}
+        else:
+            # first page: full filter + apiKey
+            params = {
+                "market": "stocks",
+                "type": "CS",
+                "active": "true",
+                "sort": "ticker",
+                "order": "asc",
+                "limit": "1000",
+                "apiKey": api_key,
+            }
+            if asof_date:
+                params["date"] = asof_date
 
-        j = http_get_json(next_url or url, params if next_url is None else {})
+        j = http_get_json(base, params)
         results = j.get("results") or []
         if not isinstance(results, list):
             break
@@ -99,16 +105,23 @@ def list_common_stocks(
         if len(out) >= max_syms:
             break
 
-        # navigate pagination
-        next_url = (j.get("next_url") or j.get("next_url")).strip() if j.get("next_url") else None
+        # Extract the cursor from next_url (if any)
+        next_url = j.get("next_url")
         if not next_url:
             break
+        # next_url looks like ".../reference/tickers?cursor=<BIGTOKEN>"
+        if "cursor=" in next_url:
+            cursor = next_url.split("cursor=", 1)[1]
+        else:
+            # Safety: if format changes, stop rather than looping forever
+            cursor = None
+            break
 
-    # Trim to max_syms
+    # Trim
     if len(out) > max_syms:
         out = out[:max_syms]
-
     return out
+
 
 
 # ----------------------------------
