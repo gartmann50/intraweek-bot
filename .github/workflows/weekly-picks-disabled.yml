@@ -1,10 +1,10 @@
 name: Weekly Picks
 
-on:
-  schedule:
-    - cron: "25 12 * * 1-5"   # pre-open (sell exits; buys gate to first session)
-    - cron: "25 21 * * 1-5"   # after-close (trailing; Friday builds picks)
-    - cron: "45 19 * * 5"     # Friday pre-close (flatten with MOC)
+#on:
+#  schedule:
+ #   - cron: "25 12 * * 1-5"   # pre-open (sell exits; buys gate to first session)
+ #   - cron: "25 21 * * 1-5"   # after-close (trailing; Friday builds picks)
+ #   - cron: "45 19 * * 5"     # Friday pre-close (flatten with MOC)
 
   workflow_dispatch:
     inputs:
