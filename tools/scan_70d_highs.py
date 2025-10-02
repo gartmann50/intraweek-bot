@@ -84,30 +84,31 @@ class Http:
             raise RuntimeError(msg)
         raise RuntimeError(f"HTTP 429 backoff exceeded on {url}")
 
-    def all_cs_tickers(self, pages: int = 3) -> List[Dict[str, Any]]:
-        """
-        Fetch up to 'pages' * 1000 common stocks (type=CS, active=true).
-        We avoid 'sort=market_cap' to keep compatibility; we can sort client-side later.
-        """
-        out: List[Dict[str, Any]] = []
-        cursor = None
-        for i in range(pages):
-            params = {
-                "market": "stocks",
-                "type": "CS",
-                "active": "true",
-                "limit": 1000,
-                # Avoid sort/order to minimize 400s
-            }
-            if cursor:
-                params["cursor"] = cursor
-            j = self.get("/v3/reference/tickers", params)
-            res = (j.get("results") or [])
-            out.extend(res)
-            cursor = j.get("next_url_params", {}).get("cursor")
-            if not cursor:
-                break
-        return out
+    def all_cs_tickers(self, pages: int = 3, asof: date | None = None) -> List[Dict[str, Any]]:
+    """
+    Fetch up to 'pages' * 1000 common stocks (type=CS, active=true) as of a given date,
+    so that 'market_cap' is populated.
+    """
+    out: List[Dict[str, Any]] = []
+    cursor = None
+    for _ in range(pages):
+        params = {
+            "market": "stocks",
+            "type": "CS",
+            "active": "true",
+            "limit": 1000,
+        }
+        if asof:
+            params["date"] = asof.isoformat()   # <-- THIS unlocks market_cap
+        if cursor:
+            params["cursor"] = cursor
+        j = self.get("/v3/reference/tickers", params)
+        out.extend(j.get("results") or [])
+        cursor = j.get("next_url_params", {}).get("cursor")
+        if not cursor:
+            break
+    return out
+
 
     def agg_day(self, symbol: str, start: date, end: date) -> List[Dict[str, Any]]:
         """Daily aggregates for a symbol in [start, end] inclusive."""
