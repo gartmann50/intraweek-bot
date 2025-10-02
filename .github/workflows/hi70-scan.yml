@@ -37,9 +37,13 @@ jobs:
         run: |
           python tools/scan_70d_highs.py \
             --friday "${{ steps.when.outputs.friday }}" \
-            --cap-min 1000000000 \
+            --since-days 130 \
             --pages 3 \
-            --out-dir backtests
+            --top 10 \
+            --out-dir backtests \
+            --min-price 5 \
+            --min-dollar-vol 3000000
+            
       - uses: actions/upload-artifact@v4
         with:
           name: hi70-${{ steps.when.outputs.friday }}
