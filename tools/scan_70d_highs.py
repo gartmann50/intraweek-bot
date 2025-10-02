@@ -193,7 +193,7 @@ def detect_week_breakout(bars: List[Dict], mon: date, fri: date) -> Tuple[float,
         d = as_date(int(b.get("t", 0)))
         if d < mon:
             before.append(b)
-        elif mon <= d <= fri:
+        elif mon <= d <= week_end:
             week.append(b)
 
     if not before or not week:
@@ -262,10 +262,13 @@ def main() -> None:
     else:
         fri = last_friday_ny()
 
-    mon = fri + timedelta(days=3)  # Monday after that Friday
-    # We request a slightly larger window to compute the prior-70 highs
+    mon = fri + timedelta(days=3)               # Monday after last Friday
+    week_end = mon + timedelta(days=4)          # the following Friday (Mon..Fri)
+    today_ny = datetime.now(NY).date()
+    if week_end > today_ny:
+        week_end = today_ny                     # don’t ask for future bars
     start = mon - timedelta(days=cfg.since_days)
-    end = fri  # latest completed Friday (we only look Mon..Fri)
+    end = week_end
 
     os.makedirs(cfg.out_dir, exist_ok=True)
 
