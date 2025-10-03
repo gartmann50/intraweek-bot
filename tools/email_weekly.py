@@ -210,6 +210,34 @@ def build_body() -> str:
         lines.append("(no hi70 digest found)")
         print("[email] No hi70 digest found")
 
+    # ---- Options snapshot (picks) ----
+    lines.append("")
+    lines.append("=== Options snapshot (±10% OTM, ~45d) — Picks ===")
+    snap = None
+    for pat in ("backtests/options_snapshot.txt", "**/options_snapshot.txt"):
+        ms = sorted(glob.glob(pat, recursive=True))
+        if ms:
+            snap = ms[0]; break
+    if snap:
+        txt = read_text(snap).strip()
+        lines.append(txt if txt else "(options snapshot empty)")
+    else:
+        lines.append("(no options snapshot)")
+
+    # ---- Options snapshot (70D breakouts) ----
+    lines.append("")
+    lines.append("=== Options snapshot (±10% OTM, ~45d) — 70D breakouts ===")
+    snap70 = None
+    for pat in ("backtests/options_snapshot_hi70.txt", "**/options_snapshot_hi70.txt"):
+        ms = sorted(glob.glob(pat, recursive=True))
+        if ms:
+            snap70 = ms[0]; break
+    if snap70:
+        txt = read_text(snap70).strip()
+        lines.append(txt if txt else "(options snapshot empty)")
+    else:
+        lines.append("(no options snapshot for 70D)")
+  
     body = ("\n".join(lines)).rstrip() + "\n"
 
     # Write for artifact/debugging
