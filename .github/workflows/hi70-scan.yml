@@ -40,11 +40,13 @@ jobs:
         run: |
           python tools/scan_70d_highs.py \
             --since-days 130 \
-            --pages 3 \
+            --pages 5 \
             --top 10 \
             --out-dir backtests \
+            --cap-min 1000000000 \
+            --universe-method marketcap \
             --min-price 5 \
-            --min-dollar-vol 3000000
+            --min-dollar-vol 10000000
 
       - name: Upload 70D-highs artifact
         uses: actions/upload-artifact@v4
