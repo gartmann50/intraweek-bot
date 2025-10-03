@@ -100,6 +100,24 @@ jobs:
             to:   ${{ secrets.SMTP_TO }}
             YAML
 
+      - name: Probe Gmail SMTP login
+        if: always()
+        shell: python
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+        run: |
+          import os, smtplib
+          h=os.environ["SMTP_HOST"]; p=int(os.environ["SMTP_PORT"])
+          u=os.environ["SMTP_USER"]; pw=os.environ["SMTP_PASS"]
+          s=smtplib.SMTP(h, p, timeout=30)
+          s.ehlo(); s.starttls(); s.ehlo()
+          s.login(u, pw)
+          print("SMTP login OK as", u)
+          s.quit()
+
       - name: Email weekly summary (picks + 70D highs)
         env:
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
