@@ -3,8 +3,8 @@
 """
 Send the weekly summary email (weekly picks + 70D highs).
 
-It builds the body from:
-  - Weekly picks (first match in this order):
+Inputs it looks for:
+  - Weekly picks text (first match):
       backtests/top6_preview.txt
       backtests/weekly-picks.txt
       backtests/weekly-picks-*.txt
@@ -18,37 +18,30 @@ It builds the body from:
       hi70_digest.txt
       **/hi70_digest.txt
 
-Config sources (first existing):
-  1) config_notify.yaml / config_notify.yml
-  2) Environment variables:
-       SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM, SMTP_TO,
-       SMTP_TLS (true/false, default true), SUBJECT_PREFIX
+Configuration:
+  1) If present, it reads config_notify.yaml / .yml
+  2) Then environment variables OVERRIDE the YAML:
+       SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS,
+       SMTP_FROM, SMTP_TO, SMTP_TLS, SUBJECT_PREFIX
+  Defaults:
+       SMTP_TLS=true, SUBJECT_PREFIX="[Weekly]"
 
-Important for Gmail:
-  - The *envelope sender* must be the authenticated account (SMTP_USER).
-  - The header "From" defaults to SMTP_USER too. If you need a different
-    visible From, add it as a verified “Send mail as” alias in Gmail;
-    only then change SMTP_FROM to that address.
-
-This script also writes the plain-text body to ./email_body.txt (for artifacts).
+Behavior:
+  - If SMTP_USER is empty, it falls back to SMTP_FROM (sane for Gmail).
+  - Writes the built body to ./email_body.txt for debugging / artifacts.
 """
 
 from __future__ import annotations
 
-import glob
 import os
-import ssl
 import sys
+import glob
+import ssl
 import smtplib
 from typing import Dict, List, Optional
-from datetime import datetime, timedelta, timezone
-from email.message import EmailMessage
-from email.utils import formataddr
-from email.message import EmailMessage
 from email.utils import parseaddr, formataddr
 
-
-# Optional YAML reading
+# Optional YAML (script works without it)
 try:
     import yaml  # type: ignore
 except Exception:  # pragma: no cover
@@ -56,7 +49,7 @@ except Exception:  # pragma: no cover
 
 
 # -------------------------
-# Utilities
+# Small file helpers
 # -------------------------
 
 def read_text(path: str) -> str:
@@ -86,7 +79,8 @@ def find_picks_file() -> Optional[str]:
         "**/weekly_picks_*.txt",
         "**/top6_preview.txt",
     ]
-    candidates: List[str] = exacts[:]
+
+    candidates = exacts[:]
     for pat in patterns:
         candidates.extend(sorted(glob.glob(pat, recursive=True)))
     return find_first(candidates)
@@ -97,58 +91,45 @@ def find_hi70_digest() -> Optional[str]:
         "backtests/hi70_digest.txt",
         "hi70_digest.txt",
     ]
-    patterns = ["**/hi70_digest.txt"]
-    candidates: List[str] = exacts[:]
+    patterns = [
+        "**/hi70_digest.txt",
+    ]
+
+    candidates = exacts[:]
     for pat in patterns:
         candidates.extend(sorted(glob.glob(pat, recursive=True)))
     return find_first(candidates)
-
-
-def parse_bool(s: str) -> bool:
-    if s is None:
-        return False
-    return str(s).strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
-def split_recipients(s: str) -> List[str]:
-    if not s:
-        return []
-    out: List[str] = []
-    for part in s.replace(";", ",").split(","):
-        p = part.strip()
-        if p:
-            out.append(p)
-    return out
-
-
-def last_friday_utc_date() -> str:
-    """Return last Friday (UTC date) like YYYY-MM-DD, used in subject."""
-    d = datetime.now(timezone.utc).date()
-    while d.weekday() != 4:  # Friday=4
-        d -= timedelta(days=1)
-    return d.isoformat()
 
 
 # -------------------------
 # Config
 # -------------------------
 
-def load_config() -> Dict[str, str]:
-    cfg: Dict[str, str] = {}
-
-    yaml_paths = ["config_notify.yaml", "config_notify.yml"]
-    ypath = next((p for p in yaml_paths if os.path.isfile(p)), None)
-    if ypath and yaml is not None:
-        try:
-            with open(ypath, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
+def _load_yaml_config() -> Dict[str, str]:
+    """Load config from YAML if present; return {} if not."""
+    for p in ("config_notify.yaml", "config_notify.yml"):
+        if os.path.isfile(p) and yaml is not None:
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    data = yaml.safe_load(f) or {}
                 if isinstance(data, dict):
+                    # Normalize to str values
+                    out: Dict[str, str] = {}
                     for k, v in data.items():
-                        cfg[str(k).strip()] = "true" if (v is True) else "false" if (v is False) else str(v)
-        except Exception:
-            pass  # fall back to env below
+                        if isinstance(v, bool):
+                            out[k] = "true" if v else "false"
+                        elif v is None:
+                            out[k] = ""
+                        else:
+                            out[k] = str(v)
+                    return out
+            except Exception:
+                pass
+    return {}
 
-    env_map = {
+
+def _env_map() -> Dict[str, str]:
+    return {
         "SMTP_HOST": "smtp_host",
         "SMTP_PORT": "smtp_port",
         "SMTP_USER": "smtp_user",
@@ -158,15 +139,44 @@ def load_config() -> Dict[str, str]:
         "SMTP_TLS":  "smtp_tls",
         "SUBJECT_PREFIX": "subject_prefix",
     }
-    for env_key, cfg_key in env_map.items():
-        if not cfg.get(cfg_key):
-            val = os.getenv(env_key, "")
-            if val:
-                cfg[cfg_key] = val
 
+
+def load_config() -> Dict[str, str]:
+    """
+    Merge YAML + ENV with ENV taking priority.
+    Adds sensible defaults and SMTP_USER fallback to SMTP_FROM.
+    """
+    cfg = _load_yaml_config()
+
+    # ENV overrides YAML (CI-friendly)
+    for env_key, cfg_key in _env_map().items():
+        val = os.getenv(env_key, "")
+        if val is not None and len(val.strip()) > 0:
+            cfg[cfg_key] = val.strip()
+
+    # Defaults
     cfg.setdefault("smtp_tls", "true")
-    cfg.setdefault("subject_prefix", "IW Bot —")
+    cfg.setdefault("subject_prefix", "[Weekly]")
+
+    # Final fallback: if login missing, use FROM
+    if not cfg.get("smtp_user", "").strip():
+        if cfg.get("smtp_from", "").strip():
+            cfg["smtp_user"] = cfg["smtp_from"].strip()
+
     return cfg
+
+
+def parse_bool(s: str) -> bool:
+    return str(s or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def split_recipients(s: str) -> List[str]:
+    out: List[str] = []
+    for part in (s or "").replace(";", ",").split(","):
+        p = part.strip()
+        if p:
+            out.append(p)
+    return out
 
 
 # -------------------------
@@ -176,22 +186,24 @@ def load_config() -> Dict[str, str]:
 def build_body() -> str:
     lines: List[str] = []
 
+    # Weekly picks
     lines.append("=== Weekly Picks ===")
     picks = find_picks_file()
     if picks:
-        txt = read_text(picks).strip() or "(picks file is empty)"
+        txt = (read_text(picks) or "").strip() or "(picks file is empty)"
         lines.append(txt)
-        print(f"[email] Using picks: {picks}")
+        print(f"[email] Using picks file: {picks}")
     else:
         lines.append("(no weekly picks file found)")
         print("[email] No weekly picks file found")
 
-    lines.append("")  # blank
+    lines.append("")  # blank line
 
+    # 70D highs
     lines.append("=== 70D Highs (Top by market cap) ===")
     digest = find_hi70_digest()
     if digest:
-        txt = read_text(digest).strip() or "(hi70 digest empty)"
+        txt = (read_text(digest) or "").strip() or "(hi70 digest empty)"
         lines.append(txt)
         print(f"[email] Using hi70 digest: {digest}")
     else:
@@ -200,6 +212,7 @@ def build_body() -> str:
 
     body = ("\n".join(lines)).rstrip() + "\n"
 
+    # Write for artifact/debugging
     try:
         with open("email_body.txt", "w", encoding="utf-8") as f:
             f.write(body)
@@ -211,67 +224,99 @@ def build_body() -> str:
 
 
 # -------------------------
-# Send
+# Send email
 # -------------------------
 
 def _addr_only(s: str) -> str:
-    """Return just the email address portion."""
+    """Return just the email address part."""
     name, addr = parseaddr(s or "")
-    return (addr or "").strip()
+    return addr or (s or "")
+
+
+def _nice_sender(s: str) -> str:
+    """Return a clean sender header (preserve name if present)."""
+    name, addr = parseaddr(s or "")
+    if not addr:
+        return s or ""
+    return formataddr((name, addr))
+
 
 def send_email(cfg: Dict[str, str], subject: str, body: str) -> None:
     host = cfg.get("smtp_host", "").strip()
     port_s = cfg.get("smtp_port", "").strip() or "587"
-    user = (cfg.get("smtp_user", "") or "").strip()
-    pwd  = (cfg.get("smtp_pass", "") or "").strip()
-    from_hdr = (cfg.get("smtp_from", "") or user).strip()
-    to_csv = (cfg.get("smtp_to", "") or "").strip()
+    from_header = cfg.get("smtp_from", "").strip()
+    to_csv = cfg.get("smtp_to", "").strip()
+
+    # login/pass with fallbacks
+    user = (cfg.get("smtp_user", "").strip() or from_header)
+    pwd  = cfg.get("smtp_pass", "").strip()
     use_tls = parse_bool(cfg.get("smtp_tls", "true"))
 
     if not host:
-        sys.exit("FATAL: SMTP host is empty")
+        sys.exit("FATAL: SMTP_HOST is empty")
     try:
         port = int(port_s)
     except Exception:
         port = 587
 
-    # Clean addresses
-    login_addr = _addr_only(user)
-    header_from_addr = _addr_only(from_hdr) or login_addr
-    to_addrs_clean = [_addr_only(x) for x in split_recipients(to_csv) if _addr_only(x)]
+    # Resolve addresses
+    from_addr = _addr_only(from_header)
+    if not from_addr:
+        sys.exit("FATAL: SMTP_FROM is empty or invalid")
 
-    if not login_addr:
-        sys.exit("FATAL: SMTP_USER (login) is empty or invalid")
-    if not to_addrs_clean:
-        sys.exit("FATAL: SMTP_TO / smtp_to is empty")
+    to_addrs = split_recipients(to_csv)
+    if not to_addrs:
+        sys.exit("FATAL: SMTP_TO is empty")
 
-    # Build message (From header can be the same as login or a verified alias)
-    msg = EmailMessage()
-    msg["From"] = formataddr(("", header_from_addr))  # or set a display name instead of ""
-    msg["To"] = ", ".join(to_addrs_clean)
-    msg["Subject"] = subject
-    msg.set_content(body, subtype="plain", charset="utf-8")
+    if not user:
+        sys.exit("FATAL: SMTP_USER (login) is empty (after fallback to FROM)")
 
-    # Envelope sender MUST be the authenticated account for Gmail
-    envelope_sender = login_addr
+    # Compose minimal plain text email
+    msg = (
+        f"From: {_nice_sender(from_header)}\r\n"
+        f"To: {', '.join(to_addrs)}\r\n"
+        f"Subject: {subject}\r\n"
+        "MIME-Version: 1.0\r\n"
+        "Content-Type: text/plain; charset=utf-8\r\n"
+        "\r\n"
+        f"{body}"
+    ).encode("utf-8")
 
-    if port == 465:
-        import ssl
-        context = ssl.create_default_context()
-        with smtplib.SMTP_SSL(host, port, context=context) as s:
-            s.login(login_addr, pwd)
-            s.sendmail(envelope_sender, to_addrs_clean, msg.as_string())
-    else:
-        import ssl
-        with smtplib.SMTP(host, port, timeout=30) as s:
-            s.ehlo()
-            if use_tls:
-                s.starttls(context=ssl.create_default_context())
+    # Brief diagnostics (no secrets)
+    print(f"[email] SMTP host={host} port={port} tls={use_tls} "
+          f"user={'present' if user else 'missing'} "
+          f"from={from_addr} to={len(to_addrs)} recipient(s)")
+
+    try:
+        if port == 465:
+            context = ssl.create_default_context()
+            with smtplib.SMTP_SSL(host, port, context=context) as s:
+                if user:
+                    s.login(user, pwd)
+                s.sendmail(from_addr, to_addrs, msg)
+        else:
+            with smtplib.SMTP(host, port, timeout=30) as s:
                 s.ehlo()
-            s.login(login_addr, pwd)
-            s.sendmail(envelope_sender, to_addrs_clean, msg.as_string())
+                if use_tls:
+                    context = ssl.create_default_context()
+                    s.starttls(context=context)
+                    s.ehlo()
+                if user:
+                    s.login(user, pwd)
+                s.sendmail(from_addr, to_addrs, msg)
+    except smtplib.SMTPAuthenticationError as e:
+        print("[email] SMTPAuthenticationError:", e)
+        print(
+            "[email] HINT (Gmail): use an App Password with 2-Step Verification: "
+            "https://myaccount.google.com/apppasswords"
+        )
+        sys.exit(1)
+    except Exception as e:
+        print("[email] ERROR sending mail:", e)
+        sys.exit(1)
 
-    print(f"[email] Sent email to {to_addrs_clean}; body length={len(body.encode('utf-8'))} bytes.")
+    print(f"[email] Sent email to {to_addrs}; body bytes={len(body.encode('utf-8'))}.")
+
 
 # -------------------------
 # Main
@@ -281,13 +326,8 @@ def main() -> None:
     cfg = load_config()
     body = build_body()
 
-    # Subject like: "IW Bot — Weekly picks + 70D highs (week 2025-09-26)"
-    week_anchor = os.getenv("FRIDAY", "") or last_friday_utc_date()
-    prefix = cfg.get("subject_prefix", "IW Bot —").strip()
-    if prefix:
-        subject = f"{prefix} Weekly picks + 70D highs (week {week_anchor})"
-    else:
-        subject = f"Weekly picks + 70D highs (week {week_anchor})"
+    prefix = (cfg.get("subject_prefix", "[Weekly]") or "").strip()
+    subject = f"{prefix} Weekly picks + 70D highs" if prefix else "Weekly picks + 70D highs"
 
     send_email(cfg, subject, body)
 
