@@ -44,6 +44,9 @@ from typing import Dict, List, Optional
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import formataddr
+from email.message import EmailMessage
+from email.utils import parseaddr, formataddr
+
 
 # Optional YAML reading
 try:
