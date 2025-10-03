@@ -316,9 +316,15 @@ jobs:
         shell: bash
         run: |
           set -e
-          f=$(ls -1 backtests/orders_*.json | tail -n1)
-          echo "== $f =="
-          cat "$f"
+          shopt -s nullglob
+          files=(backtests/orders_*.json)
+          if (( ${#files[@]} )); then
+            last="${files[-1]}"
+            echo "== $last =="
+            cat "$last"
+          else
+            echo "No orders_* file found (no buys were placed)."
+          fi
 
       - name: Show Alpaca positions (paper)
         env:
