@@ -1,26 +1,18 @@
 #!/usr/bin/env python3
 """
-Create options snapshots (Polygon) for either:
-  - 'picklist'  (default)  -> backtests/picklist_highrsi_trend.csv
-  - 'hi70'                 -> backtests/hi70_thisweek.csv
+ROBUST options snapshot (Polygon) for:
+  --mode picklist  -> backtests/picklist_highrsi_trend.csv (Top-K latest week)
+  --mode hi70      -> backtests/hi70_thisweek.csv        (Top-K by market cap)
 
-Outputs a plain text file with ±10% OTM call/put near ~target-days expiry
-for up to --topk symbols.
+It now:
+  • tries multiple expiries near target-days: 0, ±7, ±14, ±21, ±28
+  • for each expiry, tries a ladder of strikes:
+      Calls: +10%, +5%, ATM
+      Puts : -10%, -5%, ATM
+    (for very low-priced underlyings also tries small absolute steps)
+  • if NBBO is missing, falls back to last trade (label “last=”)
 
-Examples:
-  # picks
-  python tools/options_snapshot_polygon.py \
-    --mode picklist --input backtests/picklist_highrsi_trend.csv \
-    --topk 10 --target-days 45 --pct 0.10 \
-    --out backtests/options_snapshot.txt
-
-  # 70D breakouts
-  python tools/options_snapshot_polygon.py \
-    --mode hi70 --input backtests/hi70_thisweek.csv \
-    --topk 10 --target-days 45 --pct 0.10 \
-    --out backtests/options_snapshot_hi70.txt
-
-Requires env: POLYGON_API_KEY
+ENV: POLYGON_API_KEY
 """
 
 from __future__ import annotations
@@ -29,7 +21,7 @@ import argparse
 import os
 import sys
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse, parse_qs
 
@@ -40,7 +32,7 @@ import pandas as pd
 BASE = "https://api.polygon.io"
 
 
-# ---------------- Utilities ----------------
+# -------------- utilities --------------
 
 def must_env(key: str) -> str:
     v = os.getenv(key, "").strip()
@@ -65,7 +57,28 @@ def pget(path: str, params: Dict[str, str], tries: int = 5) -> Dict:
     raise RuntimeError(f"GET {path} failed ({last})")
 
 
-# ---------------- Polygon helpers ----------------
+def fmt_price(x: Optional[float]) -> str:
+    return "NA" if x is None else f"{x:.2f}"
+
+
+def ts_age_ms(ms: Optional[int]) -> str:
+    if not ms:
+        return ""
+    try:
+        t = datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+        delta = datetime.now(timezone.utc) - t
+        days = delta.days
+        secs = delta.seconds
+        hh = secs // 3600
+        mm = (secs % 3600) // 60
+        if days > 0:
+            return f"{days}d {hh:02d}h"
+        return f"{hh:02d}h{mm:02d}m"
+    except Exception:
+        return ""
+
+
+# -------------- Polygon helpers --------------
 
 def prev_close(sym: str, api: str) -> Optional[float]:
     try:
@@ -78,7 +91,7 @@ def prev_close(sym: str, api: str) -> Optional[float]:
     return None
 
 
-def list_expiries(sym: str, api: str, horizon_days: int = 180) -> List[str]:
+def list_expiries(sym: str, api: str, horizon_days: int = 210) -> List[str]:
     start = date.today(); end = start + timedelta(days=horizon_days)
     params = {
         "underlying_ticker": sym,
@@ -103,22 +116,26 @@ def list_expiries(sym: str, api: str, horizon_days: int = 180) -> List[str]:
         q = parse_qs(urlparse(nxt).query)
         cursor = (q.get("cursor") or [None])[0]
         if not cursor: break
-        if len(exps) > 3000: break
+        if len(exps) > 4000: break
     return exps
 
 
-def nearest_expiry(exps: List[str], target_days: int) -> Optional[str]:
-    if not exps: return None
+def nearest_expiry_candidates(exps: List[str], target_days: int) -> List[str]:
+    """Return expiries sorted by closeness to target ±(0, 7, 14, 21, 28)."""
     today = date.today()
     target = today + timedelta(days=target_days)
-    best, best_abs = None, 10**9
+    scored: List[Tuple[int, str]] = []
     for e in exps:
-        try: d = datetime.strptime(e, "%Y-%m-%d").date()
-        except Exception: continue
+        try:
+            d = datetime.strptime(e, "%Y-%m-%d").date()
+        except Exception:
+            continue
         diff = abs((d - target).days)
-        if diff < best_abs or (diff == best_abs and d >= today):
-            best, best_abs = e, diff
-    return best
+        scored.append((diff, e))
+    scored.sort(key=lambda x: x[0])
+    # Now apply window widening by days
+    # We just return the 10 closest expiries; the build step will probe until it finds quotes
+    return [e for _, e in scored[:10]]
 
 
 def list_strikes_for(sym: str, exp: str, cp: str, api: str) -> List[float]:
@@ -151,17 +168,44 @@ def list_strikes_for(sym: str, exp: str, cp: str, api: str) -> List[float]:
     return sorted(list(set(out)))
 
 
-def nearest_otm_strike(last: float, strikes: List[float], pct: float, cp: str) -> Optional[float]:
-    if not strikes or last is None: return None
-    target = last * (1.0 + pct if cp.upper()=="C" else 1.0 - pct)
-    if cp.upper()=="C":
-        cands = [s for s in strikes if s >= target]
-        return (min(cands, key=lambda s: abs(s-target)) if cands
-                else min(strikes, key=lambda s: abs(s-target)))
+def nearest_with_fallback(last: float, strikes: List[float], pct: float, cp: str) -> List[float]:
+    """
+    Return a TRY-LIST of strikes:
+      Calls: +pct, +pct/2, ATM
+      Puts : -pct, -pct/2, ATM
+    For very low underlyings (< $10), also add small absolute steps.
+    """
+    if not strikes:
+        return []
+    atm = min(strikes, key=lambda s: abs(s - last))
+    if cp.upper() == "C":
+        tgt1 = last * (1.0 + pct)
+        tgt2 = last * (1.0 + pct / 2.0)
+        cands = [min(strikes, key=lambda s: abs(s - tgt1)),
+                 min(strikes, key=lambda s: abs(s - tgt2)),
+                 atm]
     else:
-        cands = [s for s in strikes if s <= target]
-        return (min(cands, key=lambda s: abs(s-target)) if cands
-                else min(strikes, key=lambda s: abs(s-target)))
+        tgt1 = last * (1.0 - pct)
+        tgt2 = last * (1.0 - pct / 2.0)
+        cands = [min(strikes, key=lambda s: abs(s - tgt1)),
+                 min(strikes, key=lambda s: abs(s - tgt2)),
+                 atm]
+
+    # for very low-priced names, also try small absolute steps
+    if last < 10:
+        step = 0.5 if last >= 5 else 0.25
+        if cp.upper()=="C":
+            tgt3 = last + step
+        else:
+            tgt3 = max(0.5, last - step)
+        cands.append(min(strikes, key=lambda s: abs(s - tgt3)))
+
+    # keep unique order
+    seen = set(); ordered: List[float] = []
+    for s in cands:
+        if s not in seen:
+            ordered.append(s); seen.add(s)
+    return ordered
 
 
 def opt_ticker(sym: str, exp_yyyy_mm_dd: str, cp: str, strike: float) -> str:
@@ -170,62 +214,39 @@ def opt_ticker(sym: str, exp_yyyy_mm_dd: str, cp: str, strike: float) -> str:
     return f"O:{sym.upper()}{ymd}{cp.upper()}{k:08d}"
 
 
-def last_nbbo(option: str, api: str) -> Tuple[Optional[float], Optional[float]]:
+def get_nbbo(option: str, api: str) -> Tuple[Optional[float], Optional[float], Optional[int]]:
+    """Return (bid, ask, ts_ms) from last NBBO; ts may be None."""
     try:
         j = pget(f"/v2/last/nbbo/{option}", {"apiKey": api})
         q = j.get("results") or j.get("last") or {}
         b = q.get("bid") or q.get("P") or q.get("bP")
         a = q.get("ask") or q.get("p") or q.get("aP")
+        t = q.get("t") or q.get("sip_timestamp")
         b = float(b) if b is not None else None
         a = float(a) if a is not None else None
-        if b is not None or a is not None: return b, a
+        t = int(t) if t is not None else None
+        return b, a, t
     except Exception:
-        pass
-    # fallback
+        return None, None, None
+
+
+def get_last_trade(option: str, api: str) -> Tuple[Optional[float], Optional[int]]:
+    """Return (last_price, ts_ms) from most recent trade if available."""
     try:
-        j = pget(f"/v3/quotes/options/{option}", {"order":"desc","limit":"1","apiKey":api})
+        j = pget(f"/v3/trades/options/{option}", {"order": "desc", "limit": "1", "apiKey": api})
         res = (j.get("results") or [])
         if res:
             r = res[0]
-            b = r.get("bid_price"); a = r.get("ask_price")
-            return (float(b) if b is not None else None, float(a) if a is not None else None)
+            px = r.get("price")
+            ts = r.get("sip_timestamp") or r.get("t")
+            return (float(px) if px is not None else None,
+                    int(ts) if ts is not None else None)
     except Exception:
         pass
     return None, None
 
 
-def build_for_symbol(sym: str, pct: float, target_days: int, api: str) -> str:
-    last = prev_close(sym, api)
-    if not last:
-        return f"{sym}: (underlying price unavailable)\n"
-
-    exps = list_expiries(sym, api)
-    exp = nearest_expiry(exps, target_days)
-    if not exp:
-        return f"{sym} (close {last:.2f}): no expiries found\n"
-
-    strikes_c = list_strikes_for(sym, exp, "C", api)
-    strikes_p = list_strikes_for(sym, exp, "P", api)
-
-    sc = nearest_otm_strike(last, strikes_c, pct, "C")
-    sp = nearest_otm_strike(last, strikes_p, pct, "P")
-
-    out = [f"{sym}  close {last:.2f}  |  expiry {exp}  (~{target_days}d)"]
-
-    def leg(cp: str, s: Optional[float]) -> str:
-        if s is None: return f"  {cp}: (N/A)"
-        t = opt_ticker(sym, exp, cp[-1], s) if cp in ("C","P") else opt_ticker(sym, exp, "C" if "CALL" in cp else "P", s)
-        b, a = last_nbbo(t, api)
-        mid = None if (b is None or a is None) else (b + a) / 2.0
-        f = lambda x: "NA" if x is None else f"{x:.2f}"
-        return f"  {cp} {s:.0f}: bid {f(b)}  ask {f(a)}  mid {f(mid)}  ({t})"
-
-    out.append(leg("CALL +10%", sc))
-    out.append(leg("PUT  -10%", sp))
-    return "\n".join(out) + "\n"
-
-
-# ---------------- Symbol selection ----------------
+# -------------- symbol selection --------------
 
 def symbols_from_picklist(path: str, topk: int) -> List[str]:
     try:
@@ -251,7 +272,6 @@ def symbols_from_picklist(path: str, topk: int) -> List[str]:
 
 
 def symbols_from_hi70(path: str, topk: int) -> List[str]:
-    """Top N symbols from hi70 CSV by market_cap desc (fallback: as-is)."""
     try:
         df = pd.read_csv(path)
     except Exception:
@@ -267,16 +287,90 @@ def symbols_from_hi70(path: str, topk: int) -> List[str]:
     return uniq[: max(1, topk)]
 
 
-# ---------------- Main ----------------
+# -------------- builder --------------
+
+def try_leg(sym: str, exp: str, cp: str, strike: float, api: str) -> str:
+    opt = opt_ticker(sym, exp, cp, strike)
+    b, a, qts = get_nbbo(opt, api)
+    if b is not None or a is not None:
+        mid = None if (b is None or a is None) else (b + a) / 2.0
+        age = ts_age_ms(qts)
+        age_s = f"  ({age})" if age else ""
+        return f"{cp} {strike:.0f}: bid {fmt_price(b)} ask {fmt_price(a)} mid {fmt_price(mid)} {age_s} ({opt})"
+    # fallback to last trade
+    lp, lts = get_last_trade(opt, api)
+    if lp is not None:
+        age = ts_age_ms(lts)
+        age_s = f"  ({age})" if age else ""
+        return f"{cp} {strike:.0f}: last {fmt_price(lp)}{age_s} ({opt})"
+    return f"{cp} {strike:.0f}: bid NA ask NA mid NA ({opt})"
+
+
+def build_for_symbol(sym: str, pct: float, target_days: int, api: str) -> str:
+    last = prev_close(sym, api)
+    if not last:
+        return f"{sym}: (underlying price unavailable)\n"
+
+    exps = list_expiries(sym, api)
+    if not exps:
+        return f"{sym} (close {last:.2f}): no expiries found\n"
+
+    exp_candidates = nearest_expiry_candidates(exps, target_days)
+
+    chosen_exp = None
+    out_call = out_put = None
+
+    for exp in exp_candidates:
+        strikes_c = list_strikes_for(sym, exp, "C", api)
+        strikes_p = list_strikes_for(sym, exp, "P", api)
+        if not strikes_c and not strikes_p:
+            continue
+
+        call_try = nearest_with_fallback(last, strikes_c, pct, "C") if strikes_c else []
+        put_try  = nearest_with_fallback(last, strikes_p, pct, "P") if strikes_p else []
+
+        # choose first strike that yields any informative quote (NBBO or last)
+        def informative(s: str) -> bool:
+            return ("last " in s) or ("bid " in s and "NA" not in s)
+
+        c_line = p_line = None
+        for s in call_try:
+            txt = try_leg(sym, exp, "C", s, api)
+            c_line = txt
+            if informative(txt): break
+        for s in put_try:
+            txt = try_leg(sym, exp, "P", s, api)
+            p_line = txt
+            if informative(txt): break
+
+        # accept this expiry if at least one leg is informative
+        if (c_line and ("last " in c_line or "mid " in c_line or "bid " in c_line and "NA" not in c_line)) or \
+           (p_line and ("last " in p_line or "mid " in p_line or "bid " in p_line and "NA" not in p_line)):
+            chosen_exp = exp
+            out_call, out_put = c_line, p_line
+            break
+        # otherwise keep last tried (so we still print something)
+        if not chosen_exp:
+            chosen_exp = exp
+            out_call, out_put = c_line, p_line
+
+    header = f"{sym}  close {last:.2f}  |  expiry {chosen_exp or 'N/A'}  (~{target_days}d)"
+    lines = [header]
+    if out_call: lines.append("  " + out_call)
+    if out_put:  lines.append("  " + out_put)
+    return "\n".join(lines) + "\n"
+
+
+# -------------- main --------------
 
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", choices=["picklist","hi70"], default="picklist")
-    ap.add_argument("--input", required=True, help="CSV path (picklist or hi70)")
+    ap.add_argument("--input", required=True)
     ap.add_argument("--topk", type=int, default=10)
     ap.add_argument("--out", required=True)
     ap.add_argument("--target-days", type=int, default=45)
-    ap.add_argument("--pct", type=float, default=0.10, help="OTM percent (0.10=10%)")
+    ap.add_argument("--pct", type=float, default=0.10)
     args = ap.parse_args()
 
     api = must_env("POLYGON_API_KEY")
@@ -298,7 +392,7 @@ def main() -> None:
             lines.append(build_for_symbol(s, args.pct, args.target_days, api).rstrip())
         except Exception:
             lines.append(f"{s}: (snapshot unavailable)")
-        time.sleep(0.35)  # respect rate limits a bit
+        time.sleep(0.35)
 
     body = "\n".join(lines).rstrip() + "\n"
     open(args.out, "w", encoding="utf-8").write(body)
