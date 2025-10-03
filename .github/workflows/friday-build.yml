@@ -83,6 +83,31 @@ jobs:
           allow_forks: true
           if_no_artifact_found: warn        # <- don't fail the job if it’s missing
 
+      - name: Build options snapshot for picks (Polygon)
+        env:
+           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+        run: |
+          python tools/options_snapshot_polygon.py \
+            --mode picklist \
+            --input backtests/picklist_highrsi_trend.csv \
+            --topk 10 \
+            --target-days 45 \
+            --pct 0.10 \
+            --out backtests/options_snapshot.txt
+
+      - name: Build options snapshot for 70D breakouts (Polygon)
+        env:
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+        run: |
+          python tools/options_snapshot_polygon.py \
+            --mode hi70 \
+            --input backtests/hi70_thisweek.csv \
+            --topk 10 \
+            --target-days 45 \
+            --pct 0.10 \
+            --out backtests/options_snapshot_hi70.txt
+
+
       - name: Email config (from secrets)
         run: |
             cat > config_notify.yaml <<'YAML'
