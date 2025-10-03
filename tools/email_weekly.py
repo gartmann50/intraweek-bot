@@ -211,13 +211,18 @@ def build_body() -> str:
 # Send
 # -------------------------
 
+def _addr_only(s: str) -> str:
+    """Return just the email address portion."""
+    name, addr = parseaddr(s or "")
+    return (addr or "").strip()
+
 def send_email(cfg: Dict[str, str], subject: str, body: str) -> None:
     host = cfg.get("smtp_host", "").strip()
     port_s = cfg.get("smtp_port", "").strip() or "587"
-    user = cfg.get("smtp_user", "").strip()
-    pwd  = cfg.get("smtp_pass", "").strip()
-    from_hdr = (cfg.get("smtp_from", "") or user).strip()  # header From defaults to login user
-    to_csv = cfg.get("smtp_to", "").strip()
+    user = (cfg.get("smtp_user", "") or "").strip()
+    pwd  = (cfg.get("smtp_pass", "") or "").strip()
+    from_hdr = (cfg.get("smtp_from", "") or user).strip()
+    to_csv = (cfg.get("smtp_to", "") or "").strip()
     use_tls = parse_bool(cfg.get("smtp_tls", "true"))
 
     if not host:
@@ -227,40 +232,43 @@ def send_email(cfg: Dict[str, str], subject: str, body: str) -> None:
     except Exception:
         port = 587
 
-    to_addrs = split_recipients(to_csv)
-    if not to_addrs:
+    # Clean addresses
+    login_addr = _addr_only(user)
+    header_from_addr = _addr_only(from_hdr) or login_addr
+    to_addrs_clean = [_addr_only(x) for x in split_recipients(to_csv) if _addr_only(x)]
+
+    if not login_addr:
+        sys.exit("FATAL: SMTP_USER (login) is empty or invalid")
+    if not to_addrs_clean:
         sys.exit("FATAL: SMTP_TO / smtp_to is empty")
 
-    # Build RFC email
+    # Build message (From header can be the same as login or a verified alias)
     msg = EmailMessage()
-    # A display name is optional; we keep it simple. If you want one, set SMTP_FROM as "Your Name <you@gmail.com>"
-    msg["From"] = from_hdr
-    msg["To"] = ", ".join(to_addrs)
+    msg["From"] = formataddr(("", header_from_addr))  # or set a display name instead of ""
+    msg["To"] = ", ".join(to_addrs_clean)
     msg["Subject"] = subject
     msg.set_content(body, subtype="plain", charset="utf-8")
 
-    # Gmail requirement: envelope sender MUST be the authenticated user
-    envelope_sender = user or from_hdr
+    # Envelope sender MUST be the authenticated account for Gmail
+    envelope_sender = login_addr
 
     if port == 465:
+        import ssl
         context = ssl.create_default_context()
         with smtplib.SMTP_SSL(host, port, context=context) as s:
-            if user:
-                s.login(user, pwd)
-            s.sendmail(envelope_sender, to_addrs, msg.as_string())
+            s.login(login_addr, pwd)
+            s.sendmail(envelope_sender, to_addrs_clean, msg.as_string())
     else:
+        import ssl
         with smtplib.SMTP(host, port, timeout=30) as s:
             s.ehlo()
             if use_tls:
-                context = ssl.create_default_context()
-                s.starttls(context=context)
+                s.starttls(context=ssl.create_default_context())
                 s.ehlo()
-            if user:
-                s.login(user, pwd)
-            s.sendmail(envelope_sender, to_addrs, msg.as_string())
+            s.login(login_addr, pwd)
+            s.sendmail(envelope_sender, to_addrs_clean, msg.as_string())
 
-    print(f"[email] Sent email to {to_addrs}; body length={len(body.encode('utf-8'))} bytes.")
-
+    print(f"[email] Sent email to {to_addrs_clean}; body length={len(body.encode('utf-8'))} bytes.")
 
 # -------------------------
 # Main
