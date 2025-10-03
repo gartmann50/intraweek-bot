@@ -1,13 +1,24 @@
 #!/usr/bin/env python3
 """
-Create an options snapshot for weekly picks using Polygon.
+Create options snapshots (Polygon) for either:
+  - 'picklist'  (default)  -> backtests/picklist_highrsi_trend.csv
+  - 'hi70'                 -> backtests/hi70_thisweek.csv
 
-- Finds underlying last close via /v2/aggs/ticker/{SYM}/prev
-- Finds expiries via /v3/reference/options/contracts
-- Picks expiry nearest --target-days (default 45, good 30–60 window)
-- Picks strikes ~ +10% (call) and ~ -10% (put) from underlying last close
-- Fetches NBBO via /v2/last/nbbo/O:... (falls back to /v3/quotes/options/... if needed)
-- Writes backtests/options_snapshot.txt for the email to include
+Outputs a plain text file with ±10% OTM call/put near ~target-days expiry
+for up to --topk symbols.
+
+Examples:
+  # picks
+  python tools/options_snapshot_polygon.py \
+    --mode picklist --input backtests/picklist_highrsi_trend.csv \
+    --topk 10 --target-days 45 --pct 0.10 \
+    --out backtests/options_snapshot.txt
+
+  # 70D breakouts
+  python tools/options_snapshot_polygon.py \
+    --mode hi70 --input backtests/hi70_thisweek.csv \
+    --topk 10 --target-days 45 --pct 0.10 \
+    --out backtests/options_snapshot_hi70.txt
 
 Requires env: POLYGON_API_KEY
 """
@@ -15,7 +26,6 @@ Requires env: POLYGON_API_KEY
 from __future__ import annotations
 
 import argparse
-import math
 import os
 import sys
 import time
@@ -30,6 +40,8 @@ import pandas as pd
 BASE = "https://api.polygon.io"
 
 
+# ---------------- Utilities ----------------
+
 def must_env(key: str) -> str:
     v = os.getenv(key, "").strip()
     if not v:
@@ -38,7 +50,6 @@ def must_env(key: str) -> str:
 
 
 def pget(path: str, params: Dict[str, str], tries: int = 5) -> Dict:
-    """HTTP GET with light retry."""
     last = None
     for k in range(tries):
         try:
@@ -54,6 +65,8 @@ def pget(path: str, params: Dict[str, str], tries: int = 5) -> Dict:
     raise RuntimeError(f"GET {path} failed ({last})")
 
 
+# ---------------- Polygon helpers ----------------
+
 def prev_close(sym: str, api: str) -> Optional[float]:
     try:
         j = pget(f"/v2/aggs/ticker/{sym}/prev", {"adjusted": "true", "apiKey": api})
@@ -66,10 +79,7 @@ def prev_close(sym: str, api: str) -> Optional[float]:
 
 
 def list_expiries(sym: str, api: str, horizon_days: int = 180) -> List[str]:
-    """Distinct expiration dates in the next horizon_days."""
-    start = date.today()
-    end = start + timedelta(days=horizon_days)
-
+    start = date.today(); end = start + timedelta(days=horizon_days)
     params = {
         "underlying_ticker": sym,
         "expiration_date.gte": start.isoformat(),
@@ -79,41 +89,32 @@ def list_expiries(sym: str, api: str, horizon_days: int = 180) -> List[str]:
         "sort": "expiration_date",
         "apiKey": api,
     }
-
     exps: List[str] = []
     cursor = None
     while True:
         p = params.copy()
-        if cursor:
-            p["cursor"] = cursor
+        if cursor: p["cursor"] = cursor
         j = pget("/v3/reference/options/contracts", p)
         for r in j.get("results", []) or []:
             d = r.get("expiration_date")
-            if d and d not in exps:
-                exps.append(d)
+            if d and d not in exps: exps.append(d)
         nxt = j.get("next_url")
-        if not nxt:
-            break
+        if not nxt: break
         q = parse_qs(urlparse(nxt).query)
         cursor = (q.get("cursor") or [None])[0]
-        if not cursor:
-            break
-        if len(exps) > 3000:
-            break
+        if not cursor: break
+        if len(exps) > 3000: break
     return exps
 
 
 def nearest_expiry(exps: List[str], target_days: int) -> Optional[str]:
-    if not exps:
-        return None
+    if not exps: return None
     today = date.today()
     target = today + timedelta(days=target_days)
     best, best_abs = None, 10**9
     for e in exps:
-        try:
-            d = datetime.strptime(e, "%Y-%m-%d").date()
-        except Exception:
-            continue
+        try: d = datetime.strptime(e, "%Y-%m-%d").date()
+        except Exception: continue
         diff = abs((d - target).days)
         if diff < best_abs or (diff == best_abs and d >= today):
             best, best_abs = e, diff
@@ -121,11 +122,10 @@ def nearest_expiry(exps: List[str], target_days: int) -> Optional[str]:
 
 
 def list_strikes_for(sym: str, exp: str, cp: str, api: str) -> List[float]:
-    """All strikes for given expiry/side."""
     params = {
         "underlying_ticker": sym,
         "expiration_date": exp,
-        "contract_type": "call" if cp.upper() == "C" else "put",
+        "contract_type": "call" if cp.upper()=="C" else "put",
         "limit": "1000",
         "sort": "strike_price",
         "order": "asc",
@@ -135,57 +135,42 @@ def list_strikes_for(sym: str, exp: str, cp: str, api: str) -> List[float]:
     cursor = None
     while True:
         p = params.copy()
-        if cursor:
-            p["cursor"] = cursor
+        if cursor: p["cursor"] = cursor
         j = pget("/v3/reference/options/contracts", p)
         for r in j.get("results", []) or []:
             sp = r.get("strike_price")
             if sp is not None:
-                try:
-                    out.append(float(sp))
-                except Exception:
-                    pass
+                try: out.append(float(sp))
+                except Exception: pass
         nxt = j.get("next_url")
-        if not nxt:
-            break
+        if not nxt: break
         q = parse_qs(urlparse(nxt).query)
         cursor = (q.get("cursor") or [None])[0]
-        if not cursor:
-            break
-        if len(out) > 5000:
-            break
+        if not cursor: break
+        if len(out) > 5000: break
     return sorted(list(set(out)))
 
 
 def nearest_otm_strike(last: float, strikes: List[float], pct: float, cp: str) -> Optional[float]:
-    """Choose strike ~ last*(1+/-pct). For call pick >= target; for put pick <= target."""
-    if not strikes or last is None:
-        return None
-    target = last * (1.0 + pct if cp.upper() == "C" else 1.0 - pct)
-    if cp.upper() == "C":
-        # first strike >= target (closest OTM on the upside)
+    if not strikes or last is None: return None
+    target = last * (1.0 + pct if cp.upper()=="C" else 1.0 - pct)
+    if cp.upper()=="C":
         cands = [s for s in strikes if s >= target]
-        if cands:
-            return min(cands, key=lambda s: abs(s - target))
-        # fallback: nearest overall
-        return min(strikes, key=lambda s: abs(s - target))
+        return (min(cands, key=lambda s: abs(s-target)) if cands
+                else min(strikes, key=lambda s: abs(s-target)))
     else:
-        # first strike <= target (closest OTM on the downside)
         cands = [s for s in strikes if s <= target]
-        if cands:
-            return min(cands, key=lambda s: abs(s - target))
-        return min(strikes, key=lambda s: abs(s - target))
+        return (min(cands, key=lambda s: abs(s-target)) if cands
+                else min(strikes, key=lambda s: abs(s-target)))
 
 
 def opt_ticker(sym: str, exp_yyyy_mm_dd: str, cp: str, strike: float) -> str:
-    # Polygon format: O:{SYM}{YYYYMMDD}{C/P}{strike*1000:08d}
     ymd = exp_yyyy_mm_dd.replace("-", "")
     k = int(round(strike * 1000))
     return f"O:{sym.upper()}{ymd}{cp.upper()}{k:08d}"
 
 
 def last_nbbo(option: str, api: str) -> Tuple[Optional[float], Optional[float]]:
-    """Return (bid, ask) via v2 last/nbbo; fallback to v3 latest quote."""
     try:
         j = pget(f"/v2/last/nbbo/{option}", {"apiKey": api})
         q = j.get("results") or j.get("last") or {}
@@ -193,13 +178,12 @@ def last_nbbo(option: str, api: str) -> Tuple[Optional[float], Optional[float]]:
         a = q.get("ask") or q.get("p") or q.get("aP")
         b = float(b) if b is not None else None
         a = float(a) if a is not None else None
-        if b is not None or a is not None:
-            return b, a
+        if b is not None or a is not None: return b, a
     except Exception:
         pass
-
+    # fallback
     try:
-        j = pget(f"/v3/quotes/options/{option}", {"order": "desc", "limit": "1", "apiKey": api})
+        j = pget(f"/v3/quotes/options/{option}", {"order":"desc","limit":"1","apiKey":api})
         res = (j.get("results") or [])
         if res:
             r = res[0]
@@ -227,15 +211,13 @@ def build_for_symbol(sym: str, pct: float, target_days: int, api: str) -> str:
     sp = nearest_otm_strike(last, strikes_p, pct, "P")
 
     out = [f"{sym}  close {last:.2f}  |  expiry {exp}  (~{target_days}d)"]
+
     def leg(cp: str, s: Optional[float]) -> str:
-        if s is None:
-            return f"  {cp}: (N/A)"
-        t = opt_ticker(sym, exp, cp, s)
+        if s is None: return f"  {cp}: (N/A)"
+        t = opt_ticker(sym, exp, cp[-1], s) if cp in ("C","P") else opt_ticker(sym, exp, "C" if "CALL" in cp else "P", s)
         b, a = last_nbbo(t, api)
-        mid = None
-        if b is not None and a is not None:
-            mid = (b + a) / 2.0
-        def f(x): return "NA" if x is None else f"{x:.2f}"
+        mid = None if (b is None or a is None) else (b + a) / 2.0
+        f = lambda x: "NA" if x is None else f"{x:.2f}"
         return f"  {cp} {s:.0f}: bid {f(b)}  ask {f(a)}  mid {f(mid)}  ({t})"
 
     out.append(leg("CALL +10%", sc))
@@ -243,44 +225,68 @@ def build_for_symbol(sym: str, pct: float, target_days: int, api: str) -> str:
     return "\n".join(out) + "\n"
 
 
-def symbols_from_picklist(picklist: str, topk: int) -> List[str]:
+# ---------------- Symbol selection ----------------
+
+def symbols_from_picklist(path: str, topk: int) -> List[str]:
     try:
-        df = pd.read_csv(picklist)
+        df = pd.read_csv(path)
     except Exception:
         return []
     wk = None
-    for c in ("week_start", "week"):
-        if c in df.columns:
-            wk = c; break
+    for c in ("week_start","week"):
+        if c in df.columns: wk = c; break
     if not wk:
         return []
     latest = pd.to_datetime(df[wk], errors="coerce").dropna().dt.date.max()
     sel = df[pd.to_datetime(df[wk], errors="coerce").dt.date == latest].copy()
     if "rank" in sel.columns:
-        sel = sel.sort_values(["rank", "symbol"], ascending=[True, True])
+        sel = sel.sort_values(["rank","symbol"], ascending=[True,True])
     elif "score" in sel.columns:
-        sel = sel.sort_values(["score", "symbol"], ascending=[False, True])
+        sel = sel.sort_values(["score","symbol"], ascending=[False,True])
     syms = (sel["symbol"].dropna().astype(str).str.upper().str.strip().tolist())
     uniq: List[str] = []
     for s in syms:
-        if s not in uniq:
-            uniq.append(s)
+        if s not in uniq: uniq.append(s)
     return uniq[: max(1, topk)]
 
 
+def symbols_from_hi70(path: str, topk: int) -> List[str]:
+    """Top N symbols from hi70 CSV by market_cap desc (fallback: as-is)."""
+    try:
+        df = pd.read_csv(path)
+    except Exception:
+        return []
+    cols = {c.lower(): c for c in df.columns}
+    sym = cols.get("symbol", "symbol")
+    if "market_cap" in cols:
+        df = df.sort_values(cols["market_cap"], ascending=False)
+    syms = (df[sym].dropna().astype(str).str.upper().str.strip().tolist())
+    uniq: List[str] = []
+    for s in syms:
+        if s not in uniq: uniq.append(s)
+    return uniq[: max(1, topk)]
+
+
+# ---------------- Main ----------------
+
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--picklist", required=True, help="backtests/picklist_highrsi_trend.csv")
+    ap.add_argument("--mode", choices=["picklist","hi70"], default="picklist")
+    ap.add_argument("--input", required=True, help="CSV path (picklist or hi70)")
     ap.add_argument("--topk", type=int, default=10)
-    ap.add_argument("--out", default="backtests/options_snapshot.txt")
+    ap.add_argument("--out", required=True)
     ap.add_argument("--target-days", type=int, default=45)
-    ap.add_argument("--pct", type=float, default=0.10, help="OTM percent (0.10=10%%)")
+    ap.add_argument("--pct", type=float, default=0.10, help="OTM percent (0.10=10%)")
     args = ap.parse_args()
 
     api = must_env("POLYGON_API_KEY")
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
 
-    syms = symbols_from_picklist(args.picklist, args.topk)
+    if args.mode == "hi70":
+        syms = symbols_from_hi70(args.input, args.topk)
+    else:
+        syms = symbols_from_picklist(args.input, args.topk)
+
     if not syms:
         open(args.out, "w", encoding="utf-8").write("(no symbols to snapshot)\n")
         print(f"[opts] wrote {args.out} (no symbols)")
@@ -292,7 +298,7 @@ def main() -> None:
             lines.append(build_for_symbol(s, args.pct, args.target_days, api).rstrip())
         except Exception:
             lines.append(f"{s}: (snapshot unavailable)")
-        time.sleep(0.35)  # be nice
+        time.sleep(0.35)  # respect rate limits a bit
 
     body = "\n".join(lines).rstrip() + "\n"
     open(args.out, "w", encoding="utf-8").write(body)
