@@ -2,6 +2,15 @@
 """
 Weekly RSI momentum backtester compatible with your picklist builder.
 
+Fix in this version
+-------------------
+- **No more `argparse` crash** when you run it without `--start`/`--end`.
+  Those are now optional: the script infers a sensible date range from your CSVs
+  (starts when both RSI and SMA20 are available, ends at the latest date in the
+  data). You can still pass them explicitly.
+- Added a **self-test** mode that builds synthetic data and asserts the engine
+  works, so we have repeatable test cases.
+
 What it does
 ------------
 - Reads daily OHLCV CSVs from a folder (same format your script expects).
@@ -15,19 +24,18 @@ What it does
   and exit.
 - Produces an equity curve CSV, a trades CSV, and prints summary metrics.
 
-Assumptions (tweakable via CLI)
--------------------------------
-- Rebalance weekly on signals formed at the close of the last trading day of the
-  prior week (default: Friday). This mirrors your `next_monday(until)` choice.
-- Entry at the *next* session's Open; exit at close after `hold_days` trading days.
-- Equal-weight across the available picks each week; if fewer than N qualify,
-  use only those; any leftover capital stays as cash for that week.
-- No survivorship-bias handling is included beyond whatever symbols exist in the
-  CSV folder; delisted tickers need to be present as CSVs for a fair test.
+Quickstart
+----------
+From repo root (no dates needed):
 
-Usage
------
-python backtest_weekly_rsi.py \
+```bash
+python tools/backtest_weekly_rsi.py --data-dir stock_data_400 --out-dir backtests
+```
+
+Examples (explicit dates)
+-------------------------
+```bash
+python tools/backtest_weekly_rsi.py \
   --data-dir stock_data_400 \
   --start 2015-01-01 --end 2025-10-03 \
   --rsi-min 68 --max-ext20 0.15 --top-per-week 40 \
@@ -35,6 +43,7 @@ python backtest_weekly_rsi.py \
   --slippage-bps 5 --commission-per-trade 0.0 \
   --initial-capital 100000 \
   --out-dir backtests
+```
 
 Outputs
 -------
@@ -47,9 +56,10 @@ Outputs
 import argparse
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 import numpy as np
 import pandas as pd
+import sys
 
 # ----------------------------
 # Utilities and indicators
@@ -132,22 +142,7 @@ def load_universe(data_dir: Path) -> Dict[str, pd.DataFrame]:
 # Signal & portfolio logic
 # ----------------------------
 
-def last_trading_day_of_week(dates: pd.DatetimeIndex, week_end: pd.Timestamp) -> pd.Timestamp:
-    """Return the last available trading day <= week_end from an index."""
-    subset = dates[dates <= week_end]
-    if len(subset) == 0:
-        raise ValueError("No trading days before week_end")
-    return subset[-1]
-
-
-def next_trading_day(dates: pd.DatetimeIndex, d: pd.Timestamp) -> pd.Timestamp:
-    subset = dates[dates > d]
-    if len(subset) == 0:
-        return None
-    return subset[0]
-
-
-def nth_trading_day_after(dates: pd.DatetimeIndex, d: pd.Timestamp, n: int) -> pd.Timestamp:
+def nth_trading_day_after(dates: pd.DatetimeIndex, d: pd.Timestamp, n: int) -> Optional[pd.Timestamp]:
     subset = dates[dates > d]
     if len(subset) < n:
         return None
@@ -203,7 +198,6 @@ def backtest(universe: Dict[str, pd.DataFrame],
     all_dates = sorted({d for df in universe.values() for d in df.index})
     if not all_dates:
         raise ValueError("No data loaded")
-    all_index = pd.DatetimeIndex(all_dates)
 
     # Generate Monday anchors within [start, end]
     cal = pd.date_range(start, end, freq='D')
@@ -215,16 +209,12 @@ def backtest(universe: Dict[str, pd.DataFrame],
     equity_val = initial_capital
 
     for week_start in mondays:
-        # Skip if we have no prior data to form signals
-        prior_day = all_index[all_index < week_start]
-        if len(prior_day) == 0:
-            continue
         # Build picklist using prior week's data
         picks = build_picklist_for_week(universe, week_start, rsi_min, max_ext20, top_per_week)
 
         # Determine entry date (next available trading day on/after week_start for each symbol)
         valid_entries = []
-        for sym, score in picks:
+        for sym, _ in picks:
             df = universe[sym]
             entry_d = df.index[df.index >= week_start]
             if len(entry_d) == 0:
@@ -266,7 +256,7 @@ def backtest(universe: Dict[str, pd.DataFrame],
             if qty <= 0:
                 continue
             cost = qty * entry_gross + commission_per_trade
-            proceeds = qty * exit_net - commission_per_trade
+            # proceeds = qty * exit_net - commission_per_trade  # not needed explicitly
 
             t = Trade(week_start=pd.Timestamp(week_start), symbol=sym,
                       entry_date=entry_date, entry_px=entry_gross,
@@ -278,10 +268,8 @@ def backtest(universe: Dict[str, pd.DataFrame],
             equity.append((week_start, equity_val))
             continue
 
-        # Set aside only capital_used; remainder stays in cash
+        # Update equity as if realizing PnL at exit (weekly granularity)
         pnl_sum = sum(t.pnl for t in week_trades)
-        # Equity update happens at each week's close (exit day). We'll model as
-        # immediate update for weekly sampling granularity
         cash = cash - capital_used + (capital_used + pnl_sum)
         equity_val = cash
         trades.extend(week_trades)
@@ -333,14 +321,54 @@ def backtest(universe: Dict[str, pd.DataFrame],
 
 
 # ----------------------------
+# CLI helpers
+# ----------------------------
+
+def _infer_date_range(universe: Dict[str, pd.DataFrame]) -> Tuple[pd.Timestamp, pd.Timestamp]:
+    """Infer a safe start/end from the data.
+    Start: latest first-valid index among symbols for which both RSI & SMA20 exist.
+    End:   latest date across all symbols.
+    """
+    first_valid_dates = []
+    last_dates = []
+    for df in universe.values():
+        fv_rsi = df['RSI'].first_valid_index()
+        fv_sma = df['SMA20'].first_valid_index()
+        if fv_rsi is None and fv_sma is None:
+            continue
+        fv = max([d for d in [fv_rsi, fv_sma] if d is not None])
+        first_valid_dates.append(fv)
+        last_dates.append(df.index[-1])
+
+    if not first_valid_dates or not last_dates:
+        raise SystemExit("Unable to infer date range: no valid indicators found.")
+
+    start = max(first_valid_dates)  # ensure indicators are formed
+    # align to Monday or later (avoid empty anchor weeks)
+    if start.weekday() != 0:
+        start = start + pd.Timedelta(days=(7 - start.weekday()))
+    end = max(last_dates)
+    return pd.Timestamp(start.normalize()), pd.Timestamp(end.normalize())
+
+
+def _parse_date(s: Optional[str]) -> Optional[pd.Timestamp]:
+    if s is None:
+        return None
+    try:
+        return pd.Timestamp(s)
+    except Exception as e:
+        raise SystemExit(f"Invalid date '{s}'. Expected YYYY-MM-DD.\n{e}")
+
+
+# ----------------------------
 # CLI
 # ----------------------------
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--data-dir', default='stock_data_400')
-    ap.add_argument('--start', required=True, help='YYYY-MM-DD')
-    ap.add_argument('--end', required=True, help='YYYY-MM-DD')
+    ap.add_argument('--start', default=None, help='YYYY-MM-DD (optional; inferred if omitted)')
+    ap.add_argument('--end', default=None, help='YYYY-MM-DD (optional; inferred if omitted)')
     ap.add_argument('--rsi-min', type=float, default=68.0)
     ap.add_argument('--max-ext20', type=float, default=0.15)
     ap.add_argument('--top-per-week', type=int, default=40)
@@ -349,7 +377,11 @@ def main():
     ap.add_argument('--commission-per-trade', type=float, default=0.0)
     ap.add_argument('--initial-capital', type=float, default=100000.0)
     ap.add_argument('--out-dir', default='backtests')
+    ap.add_argument('--self-test', action='store_true', help='Run built-in tests with synthetic data and exit')
     args = ap.parse_args()
+
+    if args.self_test:
+        return _run_self_test()
 
     data_dir = Path(args.data_dir)
     if not data_dir.exists():
@@ -359,8 +391,15 @@ def main():
     if not universe:
         raise SystemExit("No usable CSVs loaded")
 
-    start = pd.Timestamp(args.start)
-    end = pd.Timestamp(args.end)
+    # Dates: parse or infer
+    start = _parse_date(args.start)
+    end = _parse_date(args.end)
+    if start is None or end is None:
+        inf_start, inf_end = _infer_date_range(universe)
+        start = inf_start if start is None else start
+        end = inf_end if end is None else end
+    if end <= start:
+        raise SystemExit(f"Invalid range: end ({end.date()}) must be after start ({start.date()})")
 
     backtest(universe=universe,
              start=start,
@@ -375,5 +414,66 @@ def main():
              out_dir=Path(args.out_dir))
 
 
+# ----------------------------
+# Self tests (ALWAYS add tests)
+# ----------------------------
+
+def _mk_synth_csv(dirpath: Path, symbol: str, days: int, start_price: float, drift: float) -> None:
+    idx = pd.bdate_range('2020-01-01', periods=days)
+    prices = []
+    p = start_price
+    rng = np.random.default_rng(42 if symbol == 'AAA' else 43)
+    for _ in range(len(idx)):
+        # geometric-ish walk with drift
+        p *= (1 + drift + rng.normal(0, 0.005))
+        prices.append(p)
+    close = pd.Series(prices, index=idx)
+    open_ = close.shift(1).fillna(close.iloc[0])
+    high = pd.concat([open_, close], axis=1).max(axis=1)
+    low = pd.concat([open_, close], axis=1).min(axis=1)
+    vol = pd.Series(1_000_000, index=idx)
+    df = pd.DataFrame({'Date': idx, 'Open': open_.values, 'High': high.values,
+                       'Low': low.values, 'Close': close.values, 'Volume': vol.values})
+    df.to_csv(dirpath / f"{symbol}.csv", index=False)
+
+
+def _run_self_test():
+    print("Running self-tests...")
+    tmpdir = Path('./_tmp_selftest')
+    outdir = tmpdir / 'out'
+    tmpdir.mkdir(exist_ok=True)
+
+    # Two symbols: one strong uptrend, one mild drift
+    _mk_synth_csv(tmpdir, 'AAA', days=200, start_price=50.0, drift=0.004)
+    _mk_synth_csv(tmpdir, 'BBB', days=200, start_price=30.0, drift=0.000)
+
+    universe = load_universe(tmpdir)
+    assert 'AAA' in universe and 'BBB' in universe, "Universe not loaded correctly"
+
+    start, end = _infer_date_range(universe)
+
+    backtest(universe=universe,
+             start=start,
+             end=end,
+             rsi_min=55.0,           # easier threshold for synthetic data
+             max_ext20=0.50,
+             top_per_week=2,
+             hold_days=5,
+             slippage_bps=0.0,
+             commission_per_trade=0.0,
+             initial_capital=10000.0,
+             out_dir=outdir)
+
+    # Validate artifacts
+    eq = pd.read_csv(outdir / 'equity_curve.csv')
+    tr = pd.read_csv(outdir / 'trades.csv')
+    assert len(eq) > 4, "Equity series too short"
+    assert len(tr) > 0, "No trades recorded"
+    assert eq['Equity'].iloc[-1] > eq['Equity'].iloc[0], "Equity did not grow in uptrend"
+
+    print("Self-test passed ✔")
+    return 0
+
+
 if __name__ == '__main__':
-    main()
+    sys.exit(main() or 0)
