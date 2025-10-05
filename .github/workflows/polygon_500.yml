@@ -1,0 +1,70 @@
+name: Build 500 by Turnover (Polygon) + Backtest
+
+on:
+  workflow_dispatch:        # run manually
+  schedule:
+    - cron: "20 2 * * 1-5"  # weekdays 02:20 UTC
+
+jobs:
+  build-and-backtest:
+    runs-on: ubuntu-latest
+
+    env:
+      # Where to write data (separate dir for 500 universe)
+      DATA_DIR: stock_data_500
+      OUT_DIR: backtests
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('**/requirements*.txt') }}
+          restore-keys: |
+            pip-${{ runner.os }}-
+
+      - name: Install deps
+        run: |
+          pip install --upgrade pip
+          pip install requests pandas numpy
+
+      - name: Compute date window (rolling 12y)
+        run: |
+          echo "START_DATE=$(date -u -d '12 years ago' +%F)" >> $GITHUB_ENV
+          echo "END_DATE=$(date -u +%F)" >> $GITHUB_ENV
+
+      - name: Build 500 largest by turnover (Polygon)
+        env:
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+        run: |
+          python tools/make_universe_polygon.py \
+            --out-dir "${DATA_DIR}" \
+            --start "${START_DATE}" \
+            --end "${END_DATE}" \
+            --universe-size 500
+
+      - name: Run RSI weekly backtest
+        run: |
+          python tools/backtest_weekly_rsi.py \
+            --data-dir "${DATA_DIR}" \
+            --out-dir "${OUT_DIR}"
+
+      - name: Upload data artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stock_data_500
+          path: ${{ env.DATA_DIR }}/**
+
+      - name: Upload backtest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtests
+          path: ${{ env.OUT_DIR }}/**
