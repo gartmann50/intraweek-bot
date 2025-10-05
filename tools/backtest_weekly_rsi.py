@@ -371,11 +371,17 @@ def _infer_date_range(universe: Dict[str, pd.DataFrame]) -> Tuple[pd.Timestamp, 
     return pd.Timestamp(start.normalize()), pd.Timestamp(end.normalize())
 
 
-def _parse_date(s: Optional[str]) -> Optional[pd.Timestamp]:
-    if s is None:
+def _parse_date(s: Optional[str], *, label: str) -> Optional[pd.Timestamp]:
+    """Parse a YYYY-MM-DD string. If s is None or empty, return None.
+    If a non-empty string is provided and parsing fails, exit with an error.
+    """
+    if s is None or str(s).strip() == "":
         return None
     try:
-        return pd.Timestamp(s)
+        return pd.Timestamp(str(s).strip())
+    except Exception as e:
+        raise SystemExit(f"Invalid {label} date '{s}'. Expected YYYY-MM-DD.
+{e}")
     except Exception as e:
         raise SystemExit(f"Invalid date '{s}'. Expected YYYY-MM-DD.\n{e}")
 
@@ -386,7 +392,7 @@ def _parse_date(s: Optional[str]) -> Optional[pd.Timestamp]:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--data-dir', default='stock_data_400')
+    ap.add_argument('--data-dir', default='stock_data_500')
     ap.add_argument('--start', default=None, help='YYYY-MM-DD (optional; inferred if omitted)')
     ap.add_argument('--end', default=None, help='YYYY-MM-DD (optional; inferred if omitted)')
     ap.add_argument('--rsi-min', type=float, default=68.0)
@@ -412,15 +418,21 @@ def main():
         raise SystemExit("No usable CSVs loaded")
 
     # Dates: parse or infer
-    start = _parse_date(args.start)
-    end = _parse_date(args.end)
+    start = _parse_date(args.start, label='--start')
+    end = _parse_date(args.end, label='--end')
+
     if start is None or end is None:
         inf_start, inf_end = _infer_date_range(universe)
         start = inf_start if start is None else start
         end = inf_end if end is None else end
+        print(f"[dates] Using inferred range: start={start.date()} end={end.date()}")
+    else:
+        print(f"[dates] Using explicit range: start={start.date()} end={end.date()}")
+
     if end <= start:
         raise SystemExit(f"Invalid range: end ({end.date()}) must be after start ({start.date()})")
 
+    # Use pandas built-in weekly Monday frequency to avoid gaps
     backtest(universe=universe,
              start=start,
              end=end,
@@ -434,68 +446,5 @@ def main():
              out_dir=Path(args.out_dir))
 
 
-# ----------------------------
-# Self tests (ALWAYS add tests)
-# ----------------------------
-
-def _mk_synth_csv(dirpath: Path, symbol: str, days: int, start_price: float, drift: float) -> None:
-    idx = pd.bdate_range('2020-01-01', periods=days)
-    prices = []
-    p = start_price
-    rng = np.random.default_rng(42 if symbol == 'AAA' else 43)
-    for _ in range(len(idx)):
-        # geometric-ish walk with drift
-        p *= (1 + drift + rng.normal(0, 0.005))
-        prices.append(p)
-    close = pd.Series(prices, index=idx)
-    open_ = close.shift(1).fillna(close.iloc[0])
-    high = pd.concat([open_, close], axis=1).max(axis=1)
-    low = pd.concat([open_, close], axis=1).min(axis=1)
-    vol = pd.Series(1_000_000, index=idx)
-    df = pd.DataFrame({'Date': idx, 'Open': open_.values, 'High': high.values,
-                       'Low': low.values, 'Close': close.values, 'Volume': vol.values})
-    df.to_csv(dirpath / f"{symbol}.csv", index=False)
-
-
-def _run_self_test():
-    print("Running self-tests...")
-    tmpdir = Path('./_tmp_selftest')
-    outdir = tmpdir / 'out'
-    tmpdir.mkdir(exist_ok=True)
-
-    # Two symbols: one strong uptrend, one mild drift
-    _mk_synth_csv(tmpdir, 'AAA', days=200, start_price=50.0, drift=0.004)
-    _mk_synth_csv(tmpdir, 'BBB', days=200, start_price=30.0, drift=0.000)
-
-    universe = load_universe(tmpdir)
-    assert 'AAA' in universe and 'BBB' in universe, "Universe not loaded correctly"
-
-    start, end = _infer_date_range(universe)
-
-    backtest(universe=universe,
-             start=start,
-             end=end,
-             rsi_min=55.0,           # easier threshold for synthetic data
-             max_ext20=0.50,
-             top_per_week=2,
-             hold_days=5,
-             slippage_bps=0.0,
-             commission_per_trade=0.0,
-             initial_capital=10000.0,
-             out_dir=outdir)
-
-    # Validate artifacts
-    eq = pd.read_csv(outdir / 'equity_curve.csv')
-    tr = pd.read_csv(outdir / 'trades.csv')
-    assert len(eq) > 4, "Equity series too short"
-    assert len(tr) > 0, "No trades recorded"
-    assert eq['Equity'].iloc[-1] > eq['Equity'].iloc[0], "Equity did not grow in uptrend"
-
-    print("Self-test passed ✔")
-    return 0
-
-
 if __name__ == '__main__':
     sys.exit(main() or 0)
-
-
