@@ -1,4 +1,4 @@
-name: Polygon Data (Incremental) + Backtest
+name: Polygon Data (optional) + Weekly RSI Backtest (with stops)
 
 on:
   workflow_dispatch:
@@ -7,12 +7,59 @@ on:
         description: "Update Polygon data before backtest?"
         type: boolean
         default: false
-  schedule:
-    - cron: "20 2 * * 1-5"   # weekdays 02:20 UTC
+
+      # ----- Backtest date window -----
+      years_back:
+        description: "Rolling window in years (ignored if you set start/end below)"
+        default: "4"
+      start:
+        description: "(optional) YYYY-MM-DD"
+        default: ""
+      end:
+        description: "(optional) YYYY-MM-DD"
+        default: ""
+
+      # ----- Picker filters -----
+      rsi_min:
+        description: "RSI threshold"
+        default: "68"
+      max_ext20:
+        description: "Max |Close/SMA20 - 1|"
+        default: "0.15"
+      trend_sma:
+        description: "Trend filter SMA(N), 0 disables"
+        default: "100"
+      weekly_up_only:
+        description: "Require current Friday >= previous Friday close?"
+        type: boolean
+        default: true
+
+      # ----- Portfolio / costs -----
+      top_per_week:
+        description: "Number of names per week"
+        default: "6"
+      slippage_bps:
+        description: "Entry/exit slippage (bps)"
+        default: "5"
+      commission:
+        description: "Commission per trade"
+        default: "0"
+
+      # ----- Stops -----
+      use_stops:
+        description: "Use in-week hard+trailing stops?"
+        type: boolean
+        default: true
+      abs_stop_pct:
+        description: "Hard stop fraction (e.g., 0.02 = 2%)"
+        default: "0.02"
+      trail_pct:
+        description: "Trailing stop fraction (e.g., 0.02 = 2%)"
+        default: "0.02"
 
 jobs:
   data:
-    if: ${{ inputs.update_data }}         # run only when toggled on
+    if: ${{ inputs.update_data }}
     name: Update Polygon data (incremental)
     runs-on: ubuntu-latest
     env:
@@ -20,20 +67,19 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+        with: { python-version: "3.11" }
+      - run: pip install --upgrade pip && pip install requests pandas
 
-      - name: Install deps
+      - name: Compute window
         run: |
-          pip install --upgrade pip
-          pip install requests pandas
-
-      - name: Compute 4y window
-        run: |
-          echo "START_DATE=$(date -u -d '4 years ago' +%F)" >> $GITHUB_ENV
-          echo "END_DATE=$(date -u +%F)" >> $GITHUB_ENV
+          if [ -n "${{ inputs.start }}" ] && [ -n "${{ inputs.end }}" ]; then
+            echo "START_DATE=${{ inputs.start }}" >> $GITHUB_ENV
+            echo "END_DATE=${{ inputs.end }}"     >> $GITHUB_ENV
+          else
+            echo "START_DATE=$(date -u -d '${{ inputs.years_back }} years ago' +%F)" >> $GITHUB_ENV
+            echo "END_DATE=$(date -u +%F)"                                         >> $GITHUB_ENV
+          fi
 
       - name: Restore data cache
         id: cache-restore
@@ -44,13 +90,11 @@ jobs:
           restore-keys: |
             polygon-data-v1
 
-      - name: Show pre-update contents
+      - name: Verify scripts present
         run: |
-          mkdir -p "${DATA_DIR}"
-          echo "Files before update:"
-          ls -1 "${DATA_DIR}" | head -n 20 || true
+          test -f tools/make_universe_polygon.py || { echo "Missing tools/make_universe_polygon.py"; exit 1; }
 
-      - name: Build 500 largest by turnover (incremental)
+      - name: Build 500 by turnover (incremental)
         env:
           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
         run: |
@@ -66,35 +110,28 @@ jobs:
           path: ${{ env.DATA_DIR }}
           key: polygon-data-v1
 
-      - name: Upload data artifact (for this run)
+      - name: Upload data artifact
         uses: actions/upload-artifact@v4
         with:
           name: stock_data_500
           path: ${{ env.DATA_DIR }}/**
 
   backtest:
-    name: Backtest
+    name: Weekly RSI Backtest (stops)
     runs-on: ubuntu-latest
-    # run regardless; it will either use the artifact from 'data' or the cached folder
     needs: [data]
-    if: ${{ always() }}   # still run when data job is skipped (toggle off)
+    if: ${{ always() }}
     env:
       DATA_DIR: stock_data_500
       OUT_DIR: backtests
 
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+        with: { python-version: "3.11" }
+      - run: pip install --upgrade pip && pip install pandas numpy
 
-      - name: Install deps
-        run: |
-          pip install --upgrade pip
-          pip install pandas numpy
-
-      # If data job ran, we have an artifact – download it
+      # Prefer fresh artifact if data job ran; else restore cached folder
       - name: Download data artifact (when updated)
         if: ${{ needs.data.result == 'success' }}
         uses: actions/download-artifact@v4
@@ -102,7 +139,6 @@ jobs:
           name: stock_data_500
           path: ${{ env.DATA_DIR }}
 
-      # If no data job (toggle off), restore the cached dataset
       - name: Restore data cache (when not updated)
         if: ${{ needs.data.result != 'success' }}
         uses: actions/cache/restore@v4
@@ -112,22 +148,36 @@ jobs:
           restore-keys: |
             polygon-data-v1
 
-      - name: Verify data exists
+      - name: Verify scripts present
         run: |
-          test -d "${DATA_DIR}" && ls -1 "${DATA_DIR}" | head -n 5 || \
-          (echo "No data found. Run with 'update_data: true' at least once to seed the cache." && exit 1)
+          test -f tools/backtest_weekly_rsi_stops.py || { echo "Missing tools/backtest_weekly_rsi_stops.py"; exit 1; }
 
-      - name: Compute 4y window (explicit dates)
+      - name: Compute window
         run: |
-          echo "START_DATE=$(date -u -d '4 years ago' +%F)" >> $GITHUB_ENV
-          echo "END_DATE=$(date -u +%F)" >> $GITHUB_ENV
+          if [ -n "${{ inputs.start }}" ] && [ -n "${{ inputs.end }}" ]; then
+            echo "START_DATE=${{ inputs.start }}" >> $GITHUB_ENV
+            echo "END_DATE=${{ inputs.end }}"     >> $GITHUB_ENV
+          else
+            echo "START_DATE=$(date -u -d '${{ inputs.years_back }} years ago' +%F)" >> $GITHUB_ENV
+            echo "END_DATE=$(date -u +%F)"                                         >> $GITHUB_ENV
+          fi
 
-      - name: Run RSI weekly backtest (no inference surprises)
+      - name: Run backtest (with stops)
         run: |
-          python tools/backtest_weekly_rsi.py \
+          python tools/backtest_weekly_rsi_stops.py \
             --data-dir "${DATA_DIR}" \
             --start "${START_DATE}" \
             --end   "${END_DATE}" \
+            --rsi-min "${{ inputs.rsi_min }}" \
+            --max-ext20 "${{ inputs.max_ext20 }}" \
+            --trend-sma "${{ inputs.trend_sma }}" \
+            $([ "${{ inputs.weekly_up_only }}" = "true" ] && echo --weekly-up-only) \
+            --top-per-week "${{ inputs.top_per_week }}" \
+            $([ "${{ inputs.use_stops }}" = "true" ] && echo --use-stops) \
+            --abs-stop-pct "${{ inputs.abs_stop_pct }}" \
+            --trail-pct "${{ inputs.trail_pct }}" \
+            --slippage-bps "${{ inputs.slippage_bps }}" \
+            --commission-per-trade "${{ inputs.commission }}" \
             --out-dir "${OUT_DIR}"
 
       - name: Upload backtest artifact
