@@ -380,6 +380,16 @@ def _parse_date(s: Optional[str], *, label: str) -> Optional[pd.Timestamp]:
     try:
         return pd.Timestamp(str(s).strip())
     except Exception as e:
+        # keep this on one line to avoid YAML patching issues
+        raise SystemExit(f"Invalid {label} date '{s}'. Expected YYYY-MM-DD. Error: {e}") -> Optional[pd.Timestamp]:
+    """Parse a YYYY-MM-DD string. If s is None or empty, return None.
+    If a non-empty string is provided and parsing fails, exit with an error.
+    """
+    if s is None or str(s).strip() == "":
+        return None
+    try:
+        return pd.Timestamp(str(s).strip())
+    except Exception as e:
         raise SystemExit(f"Invalid {label} date '{s}'. Expected YYYY-MM-DD.
 {e}")
     except Exception as e:
