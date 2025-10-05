@@ -373,6 +373,16 @@ def _infer_date_range(universe: Dict[str, pd.DataFrame]) -> Tuple[pd.Timestamp, 
 
 def _parse_date(s: Optional[str], *, label: str) -> Optional[pd.Timestamp]:
     """Parse a YYYY-MM-DD string. If s is None or empty, return None.
+    Uses format() instead of an f-string to avoid any quoting issues in CI patches.
+    """
+    if s is None or str(s).strip() == "":
+        return None
+    try:
+        return pd.Timestamp(str(s).strip())
+    except Exception as e:
+        msg = "Invalid {} date '{}'. Expected YYYY-MM-DD. Error: {}".format(label, s, e)
+        raise SystemExit(msg) -> Optional[pd.Timestamp]:
+    """Parse a YYYY-MM-DD string. If s is None or empty, return None.
     If a non-empty string is provided and parsing fails, exit with an error.
     """
     if s is None or str(s).strip() == "":
