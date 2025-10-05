@@ -7,19 +7,9 @@ on:
         description: "Update Polygon data before backtest?"
         type: boolean
         default: false
-
-      # ----- Backtest date window -----
       years_back:
-        description: "Rolling window in years (ignored if you set start/end below)"
+        description: "Rolling window in years"
         default: "4"
-      start:
-        description: "(optional) YYYY-MM-DD"
-        default: ""
-      end:
-        description: "(optional) YYYY-MM-DD"
-        default: ""
-
-      # ----- Picker filters -----
       rsi_min:
         description: "RSI threshold"
         default: "68"
@@ -29,23 +19,9 @@ on:
       trend_sma:
         description: "Trend filter SMA(N), 0 disables"
         default: "100"
-      weekly_up_only:
-        description: "Require current Friday >= previous Friday close?"
-        type: boolean
-        default: true
-
-      # ----- Portfolio / costs -----
       top_per_week:
-        description: "Number of names per week"
+        description: "Names per week"
         default: "6"
-      slippage_bps:
-        description: "Entry/exit slippage (bps)"
-        default: "5"
-      commission:
-        description: "Commission per trade"
-        default: "0"
-
-      # ----- Stops -----
       use_stops:
         description: "Use in-week hard+trailing stops?"
         type: boolean
@@ -56,6 +32,9 @@ on:
       trail_pct:
         description: "Trailing stop fraction (e.g., 0.02 = 2%)"
         default: "0.02"
+      slippage_bps:
+        description: "Entry/exit slippage (bps)"
+        default: "5"
 
 jobs:
   data:
@@ -73,16 +52,10 @@ jobs:
 
       - name: Compute window
         run: |
-          if [ -n "${{ inputs.start }}" ] && [ -n "${{ inputs.end }}" ]; then
-            echo "START_DATE=${{ inputs.start }}" >> $GITHUB_ENV
-            echo "END_DATE=${{ inputs.end }}"     >> $GITHUB_ENV
-          else
-            echo "START_DATE=$(date -u -d '${{ inputs.years_back }} years ago' +%F)" >> $GITHUB_ENV
-            echo "END_DATE=$(date -u +%F)"                                         >> $GITHUB_ENV
-          fi
+          echo "START_DATE=$(date -u -d '${{ inputs.years_back }} years ago' +%F)" >> $GITHUB_ENV
+          echo "END_DATE=$(date -u +%F)" >> $GITHUB_ENV
 
       - name: Restore data cache
-        id: cache-restore
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.DATA_DIR }}
@@ -101,7 +74,7 @@ jobs:
           python tools/make_universe_polygon.py \
             --out-dir "${DATA_DIR}" \
             --start "${START_DATE}" \
-            --end "${END_DATE}" \
+            --end   "${END_DATE}" \
             --universe-size 500
 
       - name: Save data cache
@@ -124,6 +97,7 @@ jobs:
     env:
       DATA_DIR: stock_data_500
       OUT_DIR: backtests
+      WEEKLY_UP_ONLY: "true"     # fixed default; flip to false if you want to disable
 
     steps:
       - uses: actions/checkout@v4
@@ -131,7 +105,6 @@ jobs:
         with: { python-version: "3.11" }
       - run: pip install --upgrade pip && pip install pandas numpy
 
-      # Prefer fresh artifact if data job ran; else restore cached folder
       - name: Download data artifact (when updated)
         if: ${{ needs.data.result == 'success' }}
         uses: actions/download-artifact@v4
@@ -148,19 +121,14 @@ jobs:
           restore-keys: |
             polygon-data-v1
 
-      - name: Verify scripts present
+      - name: Verify backtester present
         run: |
           test -f tools/backtest_weekly_rsi_stops.py || { echo "Missing tools/backtest_weekly_rsi_stops.py"; exit 1; }
 
       - name: Compute window
         run: |
-          if [ -n "${{ inputs.start }}" ] && [ -n "${{ inputs.end }}" ]; then
-            echo "START_DATE=${{ inputs.start }}" >> $GITHUB_ENV
-            echo "END_DATE=${{ inputs.end }}"     >> $GITHUB_ENV
-          else
-            echo "START_DATE=$(date -u -d '${{ inputs.years_back }} years ago' +%F)" >> $GITHUB_ENV
-            echo "END_DATE=$(date -u +%F)"                                         >> $GITHUB_ENV
-          fi
+          echo "START_DATE=$(date -u -d '${{ inputs.years_back }} years ago' +%F)" >> $GITHUB_ENV
+          echo "END_DATE=$(date -u +%F)" >> $GITHUB_ENV
 
       - name: Run backtest (with stops)
         run: |
@@ -171,13 +139,12 @@ jobs:
             --rsi-min "${{ inputs.rsi_min }}" \
             --max-ext20 "${{ inputs.max_ext20 }}" \
             --trend-sma "${{ inputs.trend_sma }}" \
-            $([ "${{ inputs.weekly_up_only }}" = "true" ] && echo --weekly-up-only) \
+            $([ "${WEEKLY_UP_ONLY}" = "true" ] && echo --weekly-up-only) \
             --top-per-week "${{ inputs.top_per_week }}" \
             $([ "${{ inputs.use_stops }}" = "true" ] && echo --use-stops) \
             --abs-stop-pct "${{ inputs.abs_stop_pct }}" \
             --trail-pct "${{ inputs.trail_pct }}" \
             --slippage-bps "${{ inputs.slippage_bps }}" \
-            --commission-per-trade "${{ inputs.commission }}" \
             --out-dir "${OUT_DIR}"
 
       - name: Upload backtest artifact
