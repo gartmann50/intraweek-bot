@@ -355,9 +355,10 @@ def backtest(universe: Dict[str, pd.DataFrame],
 # ----------------------------
 
 def _infer_date_range(universe: Dict[str, pd.DataFrame]) -> Tuple[pd.Timestamp, pd.Timestamp]:
-    """Infer a safe start/end from the data.
+    """
+    Infer a safe start/end from the data.
     Start: latest first-valid index among symbols for which both RSI & SMA20 exist,
-           then align to the **previous** Monday (never after `end`).
+           then align to the previous Monday (never after `end`).
     End:   latest date across all symbols.
     """
     first_valid_dates = []
@@ -367,74 +368,37 @@ def _infer_date_range(universe: Dict[str, pd.DataFrame]) -> Tuple[pd.Timestamp, 
         fv_sma = df['SMA20'].first_valid_index()
         if fv_rsi is None and fv_sma is None:
             continue
-        fv = max([d for d in [fv_rsi, fv_sma] if d is not None])
+        fv = max([d for d in (fv_rsi, fv_sma) if d is not None])
         first_valid_dates.append(fv)
         last_dates.append(df.index[-1])
 
     if not first_valid_dates or not last_dates:
         raise SystemExit("Unable to infer date range: no valid indicators found.")
 
-    # End is the latest date we actually have in the data
     end = max(last_dates).normalize()
 
-    # Start must be <= end. Align to previous Monday (or the same day if Monday).
     raw_start = max(first_valid_dates).normalize()
-    # Align to previous Monday
+    # align to previous Monday (or same day if Monday)
     start = raw_start - pd.Timedelta(days=raw_start.weekday())
 
-    # Guardrail: if alignment still goes past `end` (e.g., end is a Friday and start rounded up accidentally),
-    # clamp start to the previous Monday not after end.
     if start > end:
-        # choose the Monday of the week that contains `end`
+        # choose the Monday of the week containing `end`
         start = end - pd.Timedelta(days=end.weekday())
 
     return pd.Timestamp(start), pd.Timestamp(end)
 
-    if not first_valid_dates or not last_dates:
-        raise SystemExit("Unable to infer date range: no valid indicators found.")
-
-    start = max(first_valid_dates)  # ensure indicators are formed
-    # align to Monday or later (avoid empty anchor weeks)
-    if start.weekday() != 0:
-        start = start + pd.Timedelta(days=(7 - start.weekday()))
-    end = max(last_dates)
-    return pd.Timestamp(start.normalize()), pd.Timestamp(end.normalize())
-
 
 def _parse_date(s: Optional[str], *, label: str) -> Optional[pd.Timestamp]:
-    """Parse a YYYY-MM-DD string. If s is None or empty, return None.
-    Uses format() instead of an f-string to avoid any quoting issues in CI patches.
+    """
+    Parse a YYYY-MM-DD string. If s is None or empty, return None.
+    (Use .format() to avoid any quoting issues in CI patches.)
     """
     if s is None or str(s).strip() == "":
         return None
     try:
         return pd.Timestamp(str(s).strip())
     except Exception as e:
-        msg = "Invalid {} date '{}'. Expected YYYY-MM-DD. Error: {}".format(label, s, e)
-        raise SystemExit(msg) -> Optional[pd.Timestamp]:
-    """Parse a YYYY-MM-DD string. If s is None or empty, return None.
-    If a non-empty string is provided and parsing fails, exit with an error.
-    """
-    if s is None or str(s).strip() == "":
-        return None
-    try:
-        return pd.Timestamp(str(s).strip())
-    except Exception as e:
-        # keep this on one line to avoid YAML patching issues
-        raise SystemExit(f"Invalid {label} date '{s}'. Expected YYYY-MM-DD. Error: {e}") -> Optional[pd.Timestamp]:
-    """Parse a YYYY-MM-DD string. If s is None or empty, return None.
-    If a non-empty string is provided and parsing fails, exit with an error.
-    """
-    if s is None or str(s).strip() == "":
-        return None
-    try:
-        return pd.Timestamp(str(s).strip())
-    except Exception as e:
-        raise SystemExit(f"Invalid {label} date '{s}'. Expected YYYY-MM-DD.
-{e}")
-    except Exception as e:
-        raise SystemExit(f"Invalid date '{s}'. Expected YYYY-MM-DD.\n{e}")
-
+        raise SystemExit("Invalid {} date '{}'. Expected YYYY-MM-DD. Error: {}".format(label, s, e))
 
 # ----------------------------
 # CLI
