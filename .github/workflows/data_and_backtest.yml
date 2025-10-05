@@ -1,0 +1,118 @@
+name: Polygon Data (Incremental) + Backtest
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "20 2 * * 1-5"   # weekdays 02:20 UTC
+
+jobs:
+  data:
+    name: Update Polygon data (incremental)
+    runs-on: ubuntu-latest
+    env:
+      DATA_DIR: stock_data_500
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          pip install --upgrade pip
+          pip install requests pandas
+
+      - name: Compute 4y window
+        id: win
+        run: |
+          echo "START_DATE=$(date -u -d '4 years ago' +%F)" >> $GITHUB_ENV
+          echo "END_DATE=$(date -u +%F)" >> $GITHUB_ENV
+          echo "month=$(date -u +%Y-%m)" >> $GITHUB_OUTPUT
+
+      # Restore the data directory from cache (mutable via save step below)
+      - name: Restore data cache
+        id: cache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.DATA_DIR }}
+          key: polygon-data-v1
+          restore-keys: |
+            polygon-data-v1
+
+      - name: Show pre-update contents
+        run: |
+          mkdir -p "${DATA_DIR}"
+          echo "Files before update:"
+          ls -1 "${DATA_DIR}" | head -n 20 || true
+
+      - name: Update data incrementally (NO backtest here)
+        env:
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+        run: |
+          python tools/make_universe_polygon.py \
+            --out-dir "${DATA_DIR}" \
+            --start "${START_DATE}" \
+            --end "${END_DATE}" \
+            --universe-size 500
+
+      # Save (or refresh) the cache with newest files even if there was a hit above
+      - name: Save data cache
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.DATA_DIR }}
+          key: polygon-data-v1
+
+      - name: Upload data artifact for this run
+        uses: actions/upload-artifact@v4
+        with:
+          name: stock_data_500
+          path: ${{ env.DATA_DIR }}/**
+
+  backtest:
+    name: Backtest (consume data artifact only)
+    runs-on: ubuntu-latest
+    needs: data
+    env:
+      DATA_DIR: stock_data_500
+      OUT_DIR: backtests
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        run: |
+          pip install --upgrade pip
+          pip install pandas numpy
+
+      - name: Download data artifact from Job A
+        uses: actions/download-artifact@v4
+        with:
+          name: stock_data_500
+          path: ${{ env.DATA_DIR }}
+
+      - name: Run RSI weekly backtest (no inference surprises)
+        run: |
+          # explicit dates to avoid inference edge-cases
+          echo "START_DATE=$(date -u -d '4 years ago' +%F)" >> $GITHUB_ENV
+          echo "END_DATE=$(date -u +%F)" >> $GITHUB_ENV
+          python tools/backtest_weekly_rsi.py \
+            --data-dir "${DATA_DIR}" \
+            --start "${START_DATE}" \
+            --end   "${END_DATE}" \
+            --out-dir "${OUT_DIR}"
+
+      - name: Upload backtest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: backtests
+          path: ${{ env.OUT_DIR }}/**
