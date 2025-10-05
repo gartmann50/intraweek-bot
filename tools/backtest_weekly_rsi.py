@@ -372,38 +372,14 @@ def _infer_date_range(universe: Dict[str, pd.DataFrame]) -> Tuple[pd.Timestamp, 
 
 
 def _parse_date(s: Optional[str], *, label: str) -> Optional[pd.Timestamp]:
-    """Parse a YYYY-MM-DD string. If s is None or empty, return None.
-    Uses format() instead of an f-string to avoid any quoting issues in CI patches.
-    """
+    """Parse a YYYY-MM-DD string. If s is None or empty, return None."""
     if s is None or str(s).strip() == "":
         return None
     try:
         return pd.Timestamp(str(s).strip())
     except Exception as e:
         msg = "Invalid {} date '{}'. Expected YYYY-MM-DD. Error: {}".format(label, s, e)
-        raise SystemExit(msg) -> Optional[pd.Timestamp]:
-    """Parse a YYYY-MM-DD string. If s is None or empty, return None.
-    If a non-empty string is provided and parsing fails, exit with an error.
-    """
-    if s is None or str(s).strip() == "":
-        return None
-    try:
-        return pd.Timestamp(str(s).strip())
-    except Exception as e:
-        # keep this on one line to avoid YAML patching issues
-        raise SystemExit(f"Invalid {label} date '{s}'. Expected YYYY-MM-DD. Error: {e}") -> Optional[pd.Timestamp]:
-    """Parse a YYYY-MM-DD string. If s is None or empty, return None.
-    If a non-empty string is provided and parsing fails, exit with an error.
-    """
-    if s is None or str(s).strip() == "":
-        return None
-    try:
-        return pd.Timestamp(str(s).strip())
-    except Exception as e:
-        raise SystemExit(f"Invalid {label} date '{s}'. Expected YYYY-MM-DD.
-{e}")
-    except Exception as e:
-        raise SystemExit(f"Invalid date '{s}'. Expected YYYY-MM-DD.\n{e}")
+        raise SystemExit(msg)
 
 
 # ----------------------------
