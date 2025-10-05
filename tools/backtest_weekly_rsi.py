@@ -326,7 +326,8 @@ def backtest(universe: Dict[str, pd.DataFrame],
 
 def _infer_date_range(universe: Dict[str, pd.DataFrame]) -> Tuple[pd.Timestamp, pd.Timestamp]:
     """Infer a safe start/end from the data.
-    Start: latest first-valid index among symbols for which both RSI & SMA20 exist.
+    Start: latest first-valid index among symbols for which both RSI & SMA20 exist,
+           then align to the **previous** Monday (never after `end`).
     End:   latest date across all symbols.
     """
     first_valid_dates = []
@@ -339,6 +340,25 @@ def _infer_date_range(universe: Dict[str, pd.DataFrame]) -> Tuple[pd.Timestamp, 
         fv = max([d for d in [fv_rsi, fv_sma] if d is not None])
         first_valid_dates.append(fv)
         last_dates.append(df.index[-1])
+
+    if not first_valid_dates or not last_dates:
+        raise SystemExit("Unable to infer date range: no valid indicators found.")
+
+    # End is the latest date we actually have in the data
+    end = max(last_dates).normalize()
+
+    # Start must be <= end. Align to previous Monday (or the same day if Monday).
+    raw_start = max(first_valid_dates).normalize()
+    # Align to previous Monday
+    start = raw_start - pd.Timedelta(days=raw_start.weekday())
+
+    # Guardrail: if alignment still goes past `end` (e.g., end is a Friday and start rounded up accidentally),
+    # clamp start to the previous Monday not after end.
+    if start > end:
+        # choose the Monday of the week that contains `end`
+        start = end - pd.Timedelta(days=end.weekday())
+
+    return pd.Timestamp(start), pd.Timestamp(end)
 
     if not first_valid_dates or not last_dates:
         raise SystemExit("Unable to infer date range: no valid indicators found.")
