@@ -10,9 +10,8 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # Where to write data (separate dir for 500 universe)
-      DATA_DIR: stock_data_500
-      OUT_DIR: backtests
+      DATA_DIR: stock_data_500   # data output dir
+      OUT_DIR: backtests         # backtest output dir
 
     steps:
       - name: Checkout repo
@@ -36,9 +35,9 @@ jobs:
           pip install --upgrade pip
           pip install requests pandas numpy
 
-      - name: Compute date window (rolling 12y)
+      - name: Compute date window (rolling 4y)
         run: |
-          echo "START_DATE=$(date -u -d '12 years ago' +%F)" >> $GITHUB_ENV
+          echo "START_DATE=$(date -u -d '4 years ago' +%F)" >> $GITHUB_ENV
           echo "END_DATE=$(date -u +%F)" >> $GITHUB_ENV
 
       - name: Build 500 largest by turnover (Polygon)
