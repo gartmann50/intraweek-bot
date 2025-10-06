@@ -107,68 +107,18 @@ jobs:
             to:   ${{ secrets.SMTP_TO }}
             YAML
 
-      - name: Probe Gmail SMTP login
-        if: always()
-        shell: python
-        env:
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
-        run: |
-          import os, smtplib
-          h=os.environ["SMTP_HOST"]; p=int(os.environ["SMTP_PORT"])
-          u=os.environ["SMTP_USER"]; pw=os.environ["SMTP_PASS"]
-          s=smtplib.SMTP(h, p, timeout=30)
-          s.ehlo(); s.starttls(); s.ehlo()
-          s.login(u, pw)
-          print("SMTP login OK as", u)
-          s.quit()
-
-      - name: Probe Gmail SMTP login
-        env:
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
-          SMTP_FROM: ${{ secrets.SMTP_FROM }}
-          SMTP_TO:   ${{ secrets.SMTP_TO }}
-        run: |
-          python - <<'PY'
-          import os
-          present = [k for k in ("SMTP_HOST","SMTP_PORT","SMTP_USER","SMTP_PASS","SMTP_FROM","SMTP_TO") if os.getenv(k)]
-          missing = [k for k in ("SMTP_HOST","SMTP_PORT","SMTP_USER","SMTP_PASS","SMTP_FROM","SMTP_TO") if not os.getenv(k)]
-          print("[email] present keys:", present)
-          print("[email] missing keys:", missing)
-          if missing: raise SystemExit(1)
-          PY
-
-      - name: Send simple test email (SMTP)
-        uses: dawidd6/action-send-mail@v3
-        with:
-          server_address: smtp.gmail.com
-          server_port: 587
-          username: ${{ secrets.SMTP_USER }}
-          password: ${{ secrets.SMTP_PASS }}
-          subject: "GitHub Actions Gmail test (STARTTLS)"
-          to: ${{ secrets.SMTP_TO }}
-          from: ${{ secrets.SMTP_FROM }}
-          secure: false        # <── STARTTLS (not pure SSL)
-          ignore_cert: true
-          body: "If you see this, Gmail SMTP via port 587 works."
-
 
 
       - name: Email weekly summary (picks + 70D highs)
         env:
-          SMTP_HOST: ${{ secrets.SMTP_HOST }}
-          SMTP_PORT: ${{ secrets.SMTP_PORT }}    # "587" or "465"
-          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          SMTP_HOST: smtp.gmail.com          # explicitly Gmail host
+          SMTP_PORT: "587"                   # use STARTTLS port
+          SMTP_USER: ${{ secrets.SMTP_USER }}
           SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
           SMTP_TO:   ${{ secrets.SMTP_TO }}
-          FRIDAY:    ${{ steps.when.outputs.friday }}   # from your earlier step
-          SUBJECT:   "IW Bot — picks + 70D highs for week ${{ steps.when.outputs.friday }}"
-        run: python tools/email_weekly.py
+        run: python -u tools/email_weekly.py
+
 
       
       - name: Upload artifacts
