@@ -42,10 +42,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas requests pyyaml
 
-      # Overwrite the scanner with a clean, known-good copy and compile-check it.
-      - name: Overwrite tools/scan_70d_highs.py + compile
+      - name: Overwrite tools/scan_70d_highs.py (clean copy) and compile-check
         shell: bash
         run: |
+          set -e
           mkdir -p tools
           cat > tools/scan_70d_highs.py <<'PY'
 #!/usr/bin/env python3
@@ -110,8 +110,7 @@ def list_common_stocks(api_key: str, pages: int, on_date: Optional[date]) -> Lis
         page_n += 1
         nxt = j.get("next_url") or ""
         cursor = parse_qs(urlparse(nxt).query).get("cursor", [None])[0] if nxt else None
-        if not cursor or page_n >= pages:
-            break
+        if not cursor or page_n >= pages: break
     return results
 
 def fetch_daily_bars(api_key: str, symbol: str, start: date, end: date) -> List[Dict]:
@@ -151,7 +150,7 @@ def detect_week_breakout(bars: List[Dict], mon: date, week_end: date) -> Tuple[f
     return (prior70h, week_high, week_close, max(gap_high_pct, gap_close_pct), first_day)
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Scan 70-day highs for a given week window.")
+    p = argparse.ArgumentParser(description="Scan 70-day highs for a week window.")
     p.add_argument("--api-key", default=os.getenv("POLYGON_API_KEY",""))
     p.add_argument("--since-days", type=int, default=130)
     p.add_argument("--pages", type=int, default=5)
@@ -161,6 +160,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-price", type=float, default=5.0)
     p.add_argument("--min-dollar-vol", type=float, default=10_000_000.0)
     p.add_argument("--universe-method", default="marketcap")  # no-op compat
+    # optional preview knobs
     p.add_argument("--anchor-friday", type=str, default="")
     p.add_argument("--use-current-week", action="store_true")
     p.add_argument("--out-dir", default="backtests")
@@ -172,7 +172,7 @@ def main() -> None:
     if not key:
         sys.exit("FATAL: missing Polygon API key (POLYGON_API_KEY).")
 
-    # Date logic (safe + overrides)
+    # date logic (safe + overrides)
     today = ny_today()
     if cfg.anchor_friday:
         fri = date.fromisoformat(cfg.anchor_friday)
@@ -194,15 +194,14 @@ def main() -> None:
     os.makedirs(cfg.out_dir, exist_ok=True)
     print(f"Week window: {ymd(mon)} .. {ymd(week_end)} | bars from {ymd(start)} .. {ymd(week_end)}")
 
-    # Universe
+    # universe
     tickers = list_common_stocks(key, pages=cfg.pages, on_date=fri)
     print(f"Fetched {len(tickers)} active common stocks (pages={cfg.pages}).")
     refs: List[Tuple[str,str,float]] = []
     for t in tickers:
         sym = str(t.get("ticker") or "").upper().strip()
         if not sym: continue
-        ex = (t.get("primary_exchange") or "").upper()
-        if ex == "OTC": continue
+        if (t.get("primary_exchange") or "").upper() == "OTC": continue
         mc = float(t.get("market_cap") or 0.0)
         if cfg.cap_min and mc < cfg.cap_min: continue
         name = str(t.get("name") or "").strip()
@@ -213,9 +212,8 @@ def main() -> None:
         refs = refs[:cfg.topcap]
     print(f"Universe after filters: {len(refs)} symbols.")
 
-    # Scan
-    from typing import Tuple  # ensure Tuple is available for type hints above
-    cands: List["Candidate"] = []
+    # scan
+    cands: List[Candidate] = []
     total = len(refs)
     for i, (sym, name, mc) in enumerate(refs, 1):
         if i % 200 == 0 or i == total:
@@ -239,7 +237,7 @@ def main() -> None:
     cands.sort(key=lambda x: (x.market_cap, x.gap_high_pct, x.gap_close_pct), reverse=True)
     topN = cands[:int(cfg.top or 10)]
 
-    # Outputs
+    # outputs
     csv_path = os.path.join(cfg.out_dir, "hi70_thisweek.csv")
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
