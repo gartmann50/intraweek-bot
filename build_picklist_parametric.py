@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 """
-Minimal weekly RSI picklist builder for CI.
+Minimal weekly RSI picklist builder for CI with light trend guards.
 
-- Reads daily OHLCV csv files from --data-dir (default: stock_data_400/)
-  (files like AAPL.csv, MSFT.csv, etc.; requires Date, Open, High, Low, Close, Volume).
-- Computes RSI(14) and a simple extension filter vs 20-day SMA.
-- Keeps rows where RSI >= --rsi-min and |Close/SMA20 - 1| <= --max-ext20
-- Ranks by RSI desc, writes one-week picklist:
+Reads daily OHLCV CSV files from --data-dir (e.g. stock_data_400/),
+computes RSI(14) + extension vs SMA(20), then applies *trend filters*:
+
+  ✓ Allow at most ONE down week — reject if the last two Fridays are
+    consecutively lower than the Friday before them.
+  ✓ Require Close > SMA(20) on the 'until' date.
+  ✓ Require SMA(5) > SMA(20) on the 'until' date.
+  ✓ Require SMA(20) slope > 0 (today's SMA20 > SMA20 5 bars ago).
+
+Keeps rows where: RSI >= --rsi-min AND |Close/SMA20 - 1| <= --max-ext20 AND trend_ok
+Ranks by RSI desc and writes one-week picklist:
     week_start,symbol,rank,score,filters
-  to --out (default: backtests/picklist_highrsi_trend.csv)
+to --out (default: backtests/picklist_highrsi_trend.csv)
 """
 
 import argparse, os, sys
@@ -56,32 +62,78 @@ def rsi14(close: pd.Series) -> pd.Series:
     rsi = 100.0 - (100.0 / (1.0 + rs))
     return rsi
 
+def two_consecutive_lower_fridays(sub: pd.DataFrame) -> bool:
+    """
+    Return True if the last TWO weekly (Fri) closes are each lower than the prior Friday close.
+    (i.e., week[-1] < week[-2] AND week[-2] < week[-3])
+    """
+    if sub.empty:
+        return False
+    # end-of-week (Friday) close; if Fri is holiday, W-FRI takes the last value in that week
+    wk = sub.set_index("Date")["Close"].resample("W-FRI").last().dropna()
+    if len(wk) < 3:
+        return False
+    return (wk.iloc[-1] < wk.iloc[-2]) and (wk.iloc[-2] < wk.iloc[-3])
+
 def build_once(data_dir: Path, until_d: date, rsi_min: float, max_ext20: float, top_per_week: int):
     rows = []
     files = sorted(list(data_dir.glob("*.csv")))
     for i, p in enumerate(files):
-        sym = p.stem.upper().split("_")[0]  # strip possible _5YEAR_DATA
+        sym = p.stem.upper().split("_")[0]  # strip possible _SUFFIX
         try:
             df = load_csv(p)
         except Exception:
             continue
-        if df.empty or df["Date"].iloc[-1].date() > until_d:
-            # still ok; we’ll use the latest row we have
-            pass
-        # compute RSI & ext vs SMA20
-        close = df["Close"].astype(float)
-        sma20 = close.rolling(20, min_periods=20).mean()
-        rsi = rsi14(close)
-        latest = df.iloc[-1]
-        rsi_last = float(rsi.iloc[-1]) if pd.notna(rsi.iloc[-1]) else np.nan
-        sma_last = float(sma20.iloc[-1]) if pd.notna(sma20.iloc[-1]) else np.nan
-        if not np.isfinite(rsi_last) or not np.isfinite(sma_last):
+
+        # clip to 'until' date so we don't peek beyond the anchor
+        sub = df[df["Date"].dt.date <= until_d].copy()
+        if sub.empty:
             continue
-        ext20 = abs((latest["Close"] / sma_last) - 1.0)
-        if rsi_last >= rsi_min and ext20 <= max_ext20:
+
+        # need enough bars for SMA20 & slope
+        if len(sub) < 30:
+            continue
+
+        close = sub["Close"].astype(float)
+        sma5  = close.rolling(5,  min_periods=5).mean()
+        sma20 = close.rolling(20, min_periods=20).mean()
+        slope20 = sma20 - sma20.shift(5)  # ~1 week slope
+
+        rsi = rsi14(close)
+
+        last_rsi   = float(rsi.iloc[-1])   if pd.notna(rsi.iloc[-1])   else np.nan
+        last_sma20 = float(sma20.iloc[-1]) if pd.notna(sma20.iloc[-1]) else np.nan
+        last_sma5  = float(sma5.iloc[-1])  if pd.notna(sma5.iloc[-1])  else np.nan
+        last_close = float(close.iloc[-1])
+
+        if not (np.isfinite(last_rsi) and np.isfinite(last_sma20) and np.isfinite(last_sma5)):
+            continue
+
+        # --- trend guards ---
+        if last_close <= last_sma20:            # Close > SMA20
+            continue
+        if last_sma5 <= last_sma20:             # SMA5 > SMA20
+            continue
+        if not (float(slope20.iloc[-1]) > 0):   # SMA20 slope > 0 vs ~1 week ago
+            continue
+        if two_consecutive_lower_fridays(sub):  # reject 2 down Fridays in a row
+            continue
+
+        # extension vs SMA20
+        ext20 = abs((last_close / last_sma20) - 1.0)
+
+        # base signal filters
+        if last_rsi >= rsi_min and ext20 <= max_ext20:
             rows.append(
-                {"symbol": sym, "rsi": rsi_last, "ext20": ext20}
+                {
+                    "symbol": sym,
+                    "rsi": last_rsi,
+                    "ext20": ext20,
+                    # optional debug columns (not written to CSV, but handy if you print dfc)
+                    # "close": last_close, "sma20": last_sma20, "sma5": last_sma5, "slope20": float(slope20.iloc[-1])
+                }
             )
+
     if not rows:
         return []
     dfc = pd.DataFrame(rows).sort_values("rsi", ascending=False)
@@ -97,7 +149,7 @@ def main():
     ap.add_argument("--until", default="")
     args = ap.parse_args()
 
-    # UNTIL date (Europe/Oslo already handled by workflow; here just parse yyyy-mm-dd or use today)
+    # UNTIL date: parse yyyy-mm-dd or default to today
     if args.until:
         until_d = datetime.strptime(args.until, "%Y-%m-%d").date()
     else:
@@ -119,7 +171,10 @@ def main():
             pass
         else:
             for i, r in picks.iterrows():
-                filt = f"preset=classic; rsi_min={args.rsi_min}; ext20<={args.max_ext20}; rank=rsi"
+                filt = (
+                    f"preset=classic; rsi_min={args.rsi_min}; ext20<={args.max_ext20}; rank=rsi; "
+                    f"trend=Close>SMA20 & SMA5>SMA20 & SMA20_slope>0 & !two_down_fridays"
+                )
                 f.write(f"{week_start},{r['symbol']},{i+1},{r['rsi']:.2f},{filt}\n")
 
     print(f"Wrote {outp} | week_start={week_start} | rows={len(picks)}")
