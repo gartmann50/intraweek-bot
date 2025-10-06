@@ -189,19 +189,61 @@ jobs:
           open(os.environ["GITHUB_OUTPUT"],"a").write(f"do={do}\n")
           print("first:",first,"today:",today,"BUY=",do)
 
-      - name: Prepare buy list (Top-K)
+      - name: Prepare buy list (Top-K) — skip names already held / ordered
+        id: buylist
         if: ${{ steps.gate.outputs.go == '1' && steps.buygate.outputs.do == '1' }}
+        env:
+          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          ALPACA_ENV:    paper
+          TOPK:          ${{ env.TOPK || '6' }}
+        shell: python
         run: |
-          python - <<'PY'
-          import os, pandas as pd, pathlib as p
-          df=pd.read_csv('backtests/picklist_highrsi_trend.csv')
-          wk='week_start' if 'week_start' in df.columns else 'week'
-          w=str(pd.to_datetime(df[wk],errors='coerce').dropna().dt.date.max())
-          picks=(df[pd.to_datetime(df[wk],errors='coerce').dt.date.astype(str)==w]['symbol']
-                   .dropna().astype(str).head(6).tolist())
-          p.Path('backtests').mkdir(exist_ok=True); open('backtests/buy_symbols.txt','w').write("\n".join(picks))
-          print("picks:",picks)
-          PY
+          import os, requests, pandas as pd, pathlib as p
+
+          pick = p.Path("backtests/picklist_highrsi_trend.csv")
+          df = pd.read_csv(pick)
+          wkcol = "week_start" if "week_start" in df.columns else ("week" if "week" in df.columns else None)
+          week = str(pd.to_datetime(df[wkcol], errors="coerce").dropna().dt.date.max())
+          if "rank" in df.columns:
+              df = df.sort_values(["rank","symbol"], ascending=[True,True])
+          elif "score" in df.columns:
+              df = df.sort_values(["score","symbol"], ascending=[False,True])
+          topk = int(os.getenv("TOPK","6"))
+          picks = (df[pd.to_datetime(df[wkcol], errors="coerce").dt.date.astype(str)==week]["symbol"]
+                      .dropna().astype(str).head(topk).tolist())
+
+          base = "https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
+          H = {"APCA-API-KEY-ID": os.environ["ALPACA_KEY"], "APCA-API-SECRET-KEY": os.environ["ALPACA_SECRET"]}
+
+          # held positions
+          held=set()
+          r=requests.get(f"{base}/v2/positions", headers=H, timeout=15)
+          if r.status_code==200:
+              for pos in (r.json() or []):
+                  q=float(pos.get("qty") or 0)
+                  if abs(q)>0: held.add((pos.get("symbol") or "").upper())
+
+          # open buy orders
+          buying=set()
+          r=requests.get(f"{base}/v2/orders", params={"status":"open","limit":500}, headers=H, timeout=15)
+          if r.status_code==200:
+              for od in (r.json() or []):
+                  if (od.get("side")=="buy") and od.get("symbol"):
+                      buying.add(od["symbol"].upper())
+
+          filtered=[s for s in picks if s not in held and s not in buying]
+
+          p.Path("backtests").mkdir(exist_ok=True)
+          open("backtests/buy_symbols.txt","w").write("\n".join(filtered))
+
+          any_buy = "1" if filtered else "0"
+          print("TopK:", picks)
+          print("Held:", sorted(held))
+          print("Open buys:", sorted(buying))
+          print("Filtered to:", filtered)
+          open(os.environ["GITHUB_OUTPUT"],"a").write(f"any={any_buy}\n")
+
 
       - name: Preflight Top-K before buying (why/why-not)
         if: ${{ steps.gate.outputs.go == '1' && steps.buygate.outputs.do == '1' }}
@@ -290,7 +332,8 @@ jobs:
           open(os.environ['GITHUB_ENV'], 'a').write(f'WEEK={week}\n')
 
       - name: Buy once (long-only)
-        if: ${{ steps.gate.outputs.go == '1' && steps.buygate.outputs.do == '1' }}
+        if: ${{ steps.gate.outputs.go == '1' && steps.buygate.outputs.do == '1' && steps.buylist.outputs.any == '1' }}
+
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
