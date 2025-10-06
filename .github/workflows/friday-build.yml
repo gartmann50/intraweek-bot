@@ -101,10 +101,14 @@ jobs:
       
           PREVIEW="$(sed -n '1,80p' backtests/top6_preview.txt || true)"
       
-          if [ -f backtests/hi70_thisweek.csv ]; then
-            HI70=$(awk -F, 'NR>1 {print $1}' backtests/hi70_thisweek.csv | head -10 | paste -sd "," -)
+          # Find hi70 CSV anywhere under backtests/ (artifacts unzip into dated subfolders)
+          HI70_CSV="$(find backtests -type f -name 'hi70_thisweek.csv' -print -quit || true)"
+          if [ -n "$HI70_CSV" ]; then
+            echo "[compose] Found hi70 CSV at: $HI70_CSV"
+            HI70=$(awk -F, 'NR>1 {print $1}' "$HI70_CSV" | head -10 | paste -sd "," -)
             HI70_LINE="70D Highs (Top 10): ${HI70}"
           else
+            echo "[compose] hi70 CSV not found under backtests/"
             HI70_LINE="70D Highs: (none found or scan missing)"
           fi
       
@@ -119,12 +123,12 @@ jobs:
             echo "(Files are in the run’s artifact if you need details.)"
           } > email_compose.txt
       
-          # expose multi-line output correctly
           {
             echo "body<<BODY"
             cat email_compose.txt
             echo "BODY"
           } >> "$GITHUB_OUTPUT"
+
 
 
 
