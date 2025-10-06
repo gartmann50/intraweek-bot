@@ -121,49 +121,22 @@ jobs:
         id: compose
         shell: bash
         run: |
-          set -euo pipefail
-          FRIDAY="${{ steps.when.outputs.friday }}"
-          PREVIEW="$(sed -n '1,80p' backtests/top6_preview.txt || true)"
+          set -e
       
-          # prefer manual override if provided, else CSV with rows
-          HI70_LIST="${{ inputs.hi70_preview }}"
-          if [[ -z "${HI70_LIST}" ]]; then
-            HI70_CSV="$(find backtests -type f -name 'hi70_thisweek.csv' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2- || true)"
-            if [[ -n "${HI70_CSV}" && -f "${HI70_CSV}" ]]; then
-              ROWS=$(awk -F, 'NR>1 && $1!="" {c++} END{print c+0}' "${HI70_CSV}" || echo 0)
-              if [[ "${ROWS}" -gt 0 ]]; then
-                HI70_LIST="$(awk -F, 'NR>1 && $1!="" {print $1}' "${HI70_CSV}" | head -10 | paste -sd "," -)"
-                echo "[compose] Using CSV (${ROWS} rows): ${HI70_LIST}"
-              fi
-            fi
+          BODY="Weekly picks for ${{ steps.when.outputs.friday }} attached.\n\n"
+      
+          if [ -f backtests/hi70_digest.txt ]; then
+            echo "[debug] Including hi70_digest.txt content"
+            BODY+="Top 70D Highs (from hi70_digest.txt):\n"
+            BODY+="$(head -n 20 backtests/hi70_digest.txt)\n"
           else
-            echo "[compose] Using hi70_preview override: ${HI70_LIST}"
+            echo "[warn] No hi70_digest.txt found."
+            BODY+="(No 70D high breakouts found this week.)\n"
           fi
       
-          {
-            echo "IW Bot — Weekly Picks ${FRIDAY}"
-            echo
-            echo "Top-K preview:"
-            echo "${PREVIEW}"
-            if [[ -n "${HI70_LIST}" ]]; then
-              echo
-              echo "70D Highs (Top 10): ${HI70_LIST}"
-            fi
-            echo
-            echo "(Files are in the run’s artifact if you need details.)"
-          } > email_compose.txt
-      
-          # Export the whole body as a multi-line ENV var (more reliable than outputs)
-          {
-            echo "EMAIL_BODY<<BODY"
-            cat email_compose.txt
-            echo "BODY"
-          } >> "$GITHUB_ENV"
-      
-          # Also print first lines for sanity
-          echo "::group::Email body preview"
-          sed -n '1,60p' email_compose.txt || true
-          echo "::endgroup::"
+          echo "body<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$BODY" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
 
 
 
