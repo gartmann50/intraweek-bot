@@ -125,24 +125,19 @@ jobs:
           FRIDAY="${{ steps.when.outputs.friday }}"
           PREVIEW="$(sed -n '1,80p' backtests/top6_preview.txt || true)"
       
-          # 1) Optional manual override for testing
+          # prefer manual override if provided, else CSV with rows
           HI70_LIST="${{ inputs.hi70_preview }}"
-          if [[ -n "${HI70_LIST}" ]]; then
-            echo "[compose] Using hi70_preview override: ${HI70_LIST}"
-          else
-            # 2) Otherwise, try newest CSV from artifact (and require rows)
+          if [[ -z "${HI70_LIST}" ]]; then
             HI70_CSV="$(find backtests -type f -name 'hi70_thisweek.csv' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2- || true)"
             if [[ -n "${HI70_CSV}" && -f "${HI70_CSV}" ]]; then
               ROWS=$(awk -F, 'NR>1 && $1!="" {c++} END{print c+0}' "${HI70_CSV}" || echo 0)
               if [[ "${ROWS}" -gt 0 ]]; then
-                HI70_LIST=$(awk -F, 'NR>1 && $1!="" {print $1}' "${HI70_CSV}" | head -10 | paste -sd "," -)
+                HI70_LIST="$(awk -F, 'NR>1 && $1!="" {print $1}' "${HI70_CSV}" | head -10 | paste -sd "," -)"
                 echo "[compose] Using CSV (${ROWS} rows): ${HI70_LIST}"
-              else
-                echo "[compose] CSV present but empty; skipping inline list."
               fi
-            else
-              echo "[compose] No hi70_thisweek.csv found; skipping inline list."
             fi
+          else
+            echo "[compose] Using hi70_preview override: ${HI70_LIST}"
           fi
       
           {
@@ -158,11 +153,17 @@ jobs:
             echo "(Files are in the run’s artifact if you need details.)"
           } > email_compose.txt
       
+          # Export the whole body as a multi-line ENV var (more reliable than outputs)
           {
-            echo "body<<BODY"
+            echo "EMAIL_BODY<<BODY"
             cat email_compose.txt
             echo "BODY"
-          } >> "$GITHUB_OUTPUT"
+          } >> "$GITHUB_ENV"
+      
+          # Also print first lines for sanity
+          echo "::group::Email body preview"
+          sed -n '1,60p' email_compose.txt || true
+          echo "::endgroup::"
 
 
 
@@ -200,7 +201,8 @@ jobs:
           subject: "IW Bot — Weekly Picks ${{ steps.when.outputs.friday }}"
           from: ${{ secrets.SMTP_FROM }}
           to: ${{ secrets.SMTP_TO }}
-          body: ${{ steps.compose.outputs.body }}
+          body: ${{ env.EMAIL_BODY }}
+
 
 
 
