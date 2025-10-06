@@ -333,7 +333,6 @@ jobs:
 
       - name: Buy once (long-only)
         if: ${{ steps.gate.outputs.go == '1' && steps.buygate.outputs.do == '1' && steps.buylist.outputs.any == '1' }}
-
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
@@ -345,29 +344,33 @@ jobs:
           set -e
           echo "NOTIONAL_PER=$NOTIONAL_PER"
           echo "WEEK=$WEEK  TOPK=${TOPK}"
+
+          # Gate to open (so DAY orders don’t get rejected)
+          python - <<'PY'
+          import os, sys, time, requests, datetime as dt
+          base = "https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
+          h = {"APCA-API-KEY-ID": os.environ["ALPACA_KEY"], "APCA-API-SECRET-KEY": os.environ["ALPACA_SECRET"]}
+          r = requests.get(f"{base}/v2/clock", headers=h, timeout=20)
+          c = r.json() if r.status_code==200 else {}
+          if c.get("is_open"): sys.exit(0)
+          nxt = c.get("next_open")
+          if not nxt: sys.exit(0)
+          t = dt.datetime.fromisoformat(nxt.replace("Z","+00:00"))
+          now = dt.datetime.now(dt.timezone.utc)
+          wait = (t-now).total_seconds()
+          if 0 < wait <= 7200:
+              print(f"Market closed; sleeping {int(wait)}s until open...")
+              time.sleep(int(wait))
+          PY
+
+          # ✅ Buy from the filtered list we built earlier
           python execute_orders.py \
             --broker alpaca \
             --data-dir stock_data_400 \
-            --picklist backtests/picklist_highrsi_trend.csv \
-            --week "${WEEK}" \
-            --topk "${TOPK}" \
+            --symbols-file backtests/buy_symbols.txt \
             --side buy \
             --notional "${NOTIONAL_PER}" \
             --init-stop-atr-mult 1.75
-
-      - name: Inspect orders file
-        shell: bash
-        run: |
-          set -e
-          shopt -s nullglob
-          files=(backtests/orders_*.json)
-          if (( ${#files[@]} )); then
-            last="${files[-1]}"
-            echo "== $last =="
-            cat "$last"
-          else
-            echo "No orders_* file found (no buys were placed)."
-          fi
 
       - name: Show Alpaca positions (paper)
         env:
