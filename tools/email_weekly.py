@@ -17,7 +17,7 @@ def send_email(cfg, subject, body):
     to_raw = _need("SMTP_TO")
     to_addrs = [x.strip() for x in to_raw.split(",") if x.strip()]
 
-    # Force From==auth user unless you’ve added a Gmail alias
+    # Force From==auth user unless alias configured in Gmail
     if from_addr.strip().lower() != user.strip().lower():
         from_addr = user
 
@@ -30,15 +30,25 @@ def send_email(cfg, subject, body):
     msg["Reply-To"] = from_addr
     msg["Auto-Submitted"] = "auto-generated"
 
-    print(f"[email] host={host} port={port} from={from_addr} to={to_addrs}")
+    print(f"[email] host={host} port={port} from={from_addr}")
+    print(f"[email] TO: {to_addrs}")
     print(f"[email] SUBJECT: {subject}")
+
+    debug = os.getenv("SMTP_DEBUG","0") == "1"
+
+    def send_with(s):
+        if debug:
+            s.set_debuglevel(1)  # prints SMTP dialogue (no secrets)
+        s.ehlo() if port != 465 else None
+        if port != 465:
+            s.starttls(); s.ehlo()
+        s.login(user, pwd)
+        res = s.sendmail(from_addr, to_addrs, msg.as_string())
+        print(f"[email] SMTP sendmail() returned: {res!r}")  # {} means all accepted
 
     if port == 465:
         with smtplib.SMTP_SSL(host, port, timeout=30) as s:
-            s.login(user, pwd)
-            s.sendmail(from_addr, to_addrs, msg.as_string())
+            send_with(s)
     else:
         with smtplib.SMTP(host, port, timeout=30) as s:
-            s.ehlo(); s.starttls(); s.ehlo()
-            s.login(user, pwd)
-            s.sendmail(from_addr, to_addrs, msg.as_string())
+            send_with(s)
