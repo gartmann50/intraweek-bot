@@ -121,22 +121,35 @@ jobs:
       
           PREVIEW="$(sed -n '1,80p' backtests/top6_preview.txt || true)"
       
-          # Find the newest hi70 CSV anywhere under backtests/
+          # Try newest CSV first
           HI70_CSV="$(find backtests -type f -name 'hi70_thisweek.csv' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2- || true)"
-          HI70_LINE=""
+          HI70_LIST=""
           if [[ -n "${HI70_CSV}" && -f "${HI70_CSV}" ]]; then
-            echo "[compose] Found hi70 CSV: ${HI70_CSV}"
-            # Count non-empty symbol rows (skip header)
             ROWS=$(awk -F, 'NR>1 && $1!="" {c++} END{print c+0}' "${HI70_CSV}" || echo 0)
-            echo "[compose] hi70 rows=${ROWS}"
             if [[ "${ROWS}" -gt 0 ]]; then
               HI70_LIST=$(awk -F, 'NR>1 && $1!="" {print $1}' "${HI70_CSV}" | head -10 | paste -sd "," -)
-              HI70_LINE="70D Highs (Top 10): ${HI70_LIST}"
+              echo "[compose] Using CSV (${ROWS} rows): ${HI70_LIST}"
             else
-              echo "[compose] hi70 CSV has no symbols; skipping inline list."
+              echo "[compose] CSV present but empty (header-only)."
             fi
           else
-            echo "[compose] No hi70 CSV found under backtests/; skipping inline list."
+            echo "[compose] No hi70_thisweek.csv found."
+          fi
+      
+          # Fallback to digest if CSV had no names
+          if [[ -z "${HI70_LIST}" ]]; then
+            HI70_TXT="$(find backtests -type f -name 'hi70_digest.txt' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2- || true)"
+            if [[ -n "${HI70_TXT}" && -f "${HI70_TXT}" ]]; then
+              # Lines look like: " 1. TICKER ..."; capture the ticker
+              HI70_LIST=$(awk 'match($0,/^[[:space:]]*[0-9]+[.)][[:space:]]+([A-Z0-9.-]+)/,m){print m[1]}' "${HI70_TXT}" | head -10 | paste -sd "," - || true)
+              if [[ -n "${HI70_LIST}" ]]; then
+                echo "[compose] Using digest: ${HI70_LIST}"
+              else
+                echo "[compose] Digest found but no tickers parsed."
+              fi
+            else
+              echo "[compose] No hi70_digest.txt found."
+            fi
           fi
       
           {
@@ -144,9 +157,9 @@ jobs:
             echo
             echo "Top-K preview:"
             echo "${PREVIEW}"
-            if [[ -n "${HI70_LINE}" ]]; then
+            if [[ -n "${HI70_LIST}" ]]; then
               echo
-              echo "${HI70_LINE}"
+              echo "70D Highs (Top 10): ${HI70_LIST}"
             fi
             echo
             echo "(Files are in the run’s artifact if you need details.)"
@@ -157,6 +170,7 @@ jobs:
             cat email_compose.txt
             echo "BODY"
           } >> "$GITHUB_OUTPUT"
+
 
 
 
