@@ -143,6 +143,20 @@ jobs:
           if missing: raise SystemExit(1)
           PY
 
+      - name: Send simple test email (SMTP)
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_HOST }}    # e.g. smtp.gmail.com
+          server_port:    ${{ secrets.SMTP_PORT }}    # 587 or 465
+          username:       ${{ secrets.SMTP_USER }}    # your Gmail
+          password:       ${{ secrets.SMTP_PASS }}    # Gmail App Password
+          subject: "GitHub Actions SMTP test"
+          to:       ${{ secrets.SMTP_TO }}
+          from:     ${{ secrets.SMTP_FROM }}          # usually same as username
+          secure:   true                               # STARTTLS/SSL auto
+          body: "If you see this, SMTP from the runner works."
+
+
 
       - name: Email weekly summary (picks + 70D highs)
         env:
