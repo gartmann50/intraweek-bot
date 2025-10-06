@@ -96,21 +96,39 @@ jobs:
         id: compose
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
           FRIDAY="${{ steps.when.outputs.friday }}"
       
           PREVIEW="$(sed -n '1,80p' backtests/top6_preview.txt || true)"
       
-          # Find hi70 CSV anywhere under backtests/ (artifacts unzip into dated subfolders)
+          # Locate hi70 CSV (artifacts unzip into dated subfolders)
           HI70_CSV="$(find backtests -type f -name 'hi70_thisweek.csv' -print -quit || true)"
-          if [ -n "$HI70_CSV" ]; then
-            echo "[compose] Found hi70 CSV at: $HI70_CSV"
-            HI70=$(awk -F, 'NR>1 {print $1}' "$HI70_CSV" | head -10 | paste -sd "," -)
-            HI70_LINE="70D Highs (Top 10): ${HI70}"
+          HI70_LIST=""
+      
+          if [ -n "${HI70_CSV}" ] && [ -f "${HI70_CSV}" ]; then
+            echo "[compose] Found hi70 CSV at: ${HI70_CSV}"
+            # Extract first column (symbol), skip header, take top 10, join with commas
+            HI70_LIST="$(awk -F, 'NR>1 && $1!="" {print $1}' "${HI70_CSV}" | head -10 | paste -sd "," - || true)"
           else
             echo "[compose] hi70 CSV not found under backtests/"
-            HI70_LINE="70D Highs: (none found or scan missing)"
           fi
+      
+          # Fallback: try digest (parse ticker at start of each numbered line)
+          if [ -z "${HI70_LIST}" ]; then
+            HI70_TXT="$(find backtests -type f -name 'hi70_digest.txt' -print -quit || true)"
+            if [ -n "${HI70_TXT}" ] && [ -f "${HI70_TXT}" ]; then
+              echo "[compose] Falling back to digest at: ${HI70_TXT}"
+              HI70_LIST="$(awk 'match($0,/^[[:space:]]*[0-9]+[.)][[:space:]]+([A-Z0-9.-]+)/,m){print m[1]}' "${HI70_TXT}" | head -10 | paste -sd "," - || true)"
+            fi
+          fi
+      
+          if [ -n "${HI70_LIST}" ]; then
+            HI70_LINE="70D Highs (Top 10): ${HI70_LIST}"
+          else
+            HI70_LINE="70D Highs (Top 10): (none found)"
+          fi
+      
+          echo "[compose] HI70_LIST = ${HI70_LIST:-<empty>}"
       
           {
             echo "IW Bot — Weekly Picks ${FRIDAY}"
@@ -128,6 +146,7 @@ jobs:
             cat email_compose.txt
             echo "BODY"
           } >> "$GITHUB_OUTPUT"
+
 
 
 
