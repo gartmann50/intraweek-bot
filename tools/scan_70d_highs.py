@@ -186,7 +186,6 @@ def main() -> None:
         mon = fri + timedelta(days=3)
     week_end = min(mon + timedelta(days=4), today)
 
-    start = mon - timedelta(days=cfg.since_days)
 
     os.makedirs(cfg.out_dir, exist_ok=True)
     print(f"Week window: {ymd(mon)} .. {ymd(week_end)} | bars from {ymd(start)} .. {ymd(week_end)}")
