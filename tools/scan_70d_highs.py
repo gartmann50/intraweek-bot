@@ -178,7 +178,7 @@ def main() -> None:
         if not sym: continue
         if (t.get("primary_exchange") or "").upper() == "OTC": continue
         mc = float(t.get("market_cap") or 0.0)
-        if cfg.cap_min and mc < cfg.cap_min: continue
+        if cfg.cap_min and mc and mc < cfg.cap_min:  continue
         name = str(t.get("name") or "").strip()
         refs.append((sym, name, mc))
 
