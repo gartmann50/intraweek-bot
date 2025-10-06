@@ -25,6 +25,7 @@ from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 import requests
 import glob
+from email.mime.text import MIMEText
 
 # optional YAML
 try:
@@ -335,47 +336,47 @@ def build_body() -> str:
     return body
 
 # -------------- send --------------
-def send_email(cfg: Dict[str, str], subject: str, body: str) -> None:
-    host = cfg.get("smtp_host","").strip()
-    port_s = cfg.get("smtp_port","587").strip()
-    user = cfg.get("smtp_user","").strip()
-    pwd  = cfg.get("smtp_pass","").strip()
-    from_addr = cfg.get("smtp_from","").strip()
-    to_csv = cfg.get("smtp_to","").strip()
-    use_tls = parse_bool(cfg.get("smtp_tls","true"))
+def send_email(cfg, subject, body):
+    """
+    Sends a plain-text email via SMTP.
+    Works out-of-the-box with Gmail when using an App Password.
+    """
+    host = os.environ.get("SMTP_HOST", "smtp.gmail.com")
+    port = int(os.environ.get("SMTP_PORT", "587"))
+    user = os.environ["SMTP_USER"]               # required
+    pwd  = os.environ["SMTP_PASS"]               # required
+    from_addr = os.environ.get("SMTP_FROM", user)
+    to_raw = os.environ["SMTP_TO"]               # required
+    to_addrs = [x.strip() for x in to_raw.split(",") if x.strip()]
 
-    if not host: sys.exit("FATAL: SMTP host is empty")
-    to_addrs = split_recipients(to_csv)
-    if not to_addrs: sys.exit("FATAL: SMTP_TO / smtp_to is empty")
+    # Safety: Gmail rejects unknown From unless configured as an alias.
+    if from_addr.strip().lower() != user.strip().lower():
+        # You can remove this override if you've added the alias in Gmail (Send mail as)
+        from_addr = user
 
-    try: port = int(port_s)
-    except Exception: port = 587
+    # Build message
+    msg = MIMEText(body, "plain", "utf-8")
+    msg["Subject"] = subject
+    msg["From"] = from_addr
+    msg["To"] = ", ".join(to_addrs)
 
-    msg = (
-        f"From: {from_addr}\r\n"
-        f"To: {', '.join(to_addrs)}\r\n"
-        f"Subject: {subject}\r\n"
-        "MIME-Version: 1.0\r\n"
-        "Content-Type: text/plain; charset=utf-8\r\n"
-        "\r\n"
-        f"{body}"
-    ).encode("utf-8")
+    # Helpful logging (no secrets)
+    print(f"[email] host={host} port={port} from={from_addr} to={to_addrs}")
 
+    # Port handling: 465 => SSL; 587 => STARTTLS
     if port == 465:
-        ctx = ssl.create_default_context()
-        with smtplib.SMTP_SSL(host, port, context=ctx) as s:
-            if user: s.login(user, pwd)
-            s.sendmail(from_addr, to_addrs, msg)
+        with smtplib.SMTP_SSL(host, port, timeout=30) as s:
+            s.login(user, pwd)
+            s.sendmail(from_addr, to_addrs, msg.as_string())
     else:
+        # Default to 587 STARTTLS (Gmail standard)
         with smtplib.SMTP(host, port, timeout=30) as s:
             s.ehlo()
-            if use_tls:
-                ctx = ssl.create_default_context()
-                s.starttls(context=ctx); s.ehlo()
-            if user: s.login(user, pwd)
-            s.sendmail(from_addr, to_addrs, msg)
+            s.starttls()      # <— IMPORTANT for 587
+            s.ehlo()
+            s.login(user, pwd)
+            s.sendmail(from_addr, to_addrs, msg.as_string())
 
-    print(f"[email] Sent to {to_addrs}; size={len(msg)} bytes")
 
 # -------------- main --------------
 def main() -> None:
