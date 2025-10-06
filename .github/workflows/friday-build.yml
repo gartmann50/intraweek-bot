@@ -92,6 +92,41 @@ jobs:
       - name: Options snapshot — 70D breakouts (disabled)
         run: echo "Options snapshot disabled for now."
 
+      - name: Compose email body (weekly picks + Top-10 70D highs)
+        id: compose
+        run: |
+          set -e
+          FRIDAY="${{ steps.when.outputs.friday }}"
+      
+          # Top-K preview (already created earlier)
+          PREVIEW="$(sed -n '1,80p' backtests/top6_preview.txt || true)"
+      
+          # Extract Top-10 symbols from hi70 csv if present
+          if [ -f backtests/hi70_thisweek.csv ]; then
+            HI70=$(awk -F, 'NR>1 {print $1}' backtests/hi70_thisweek.csv | head -10 | paste -sd "," -)
+            HI70_LINE="70D Highs (Top 10): ${HI70}"
+          else
+            HI70_LINE="70D Highs: (none found or scan missing)"
+          fi
+      
+          {
+            echo "IW Bot — Weekly Picks ${FRIDAY}"
+            echo
+            echo "Top-K preview:"
+            echo "${PREVIEW}"
+            echo
+            echo "${HI70_LINE}"
+            echo
+            echo "(Files are in the run’s artifact if you need details.)"
+          } > email_compose.txt
+      
+          # Expose the whole body as a multi-line output
+          {
+            echo "body<<'EOF'"
+            cat email_compose.txt
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
 
       - name: Email config (from secrets)
         run: |
@@ -116,22 +151,15 @@ jobs:
         uses: dawidd6/action-send-mail@v3
         with:
           server_address: smtp.gmail.com
-          server_port: 587              # STARTTLS
-          secure: false                 # important: STARTTLS, not SSL
+          server_port: 587
+          secure: false
           username: ${{ secrets.SMTP_USER }}
           password: ${{ secrets.SMTP_PASS }}
           subject: "IW Bot — Weekly Picks ${{ steps.when.outputs.friday }}"
           from: ${{ secrets.SMTP_FROM }}
-          to:   ${{ secrets.SMTP_TO }}
-          body: |
-            Weekly picks for ${{ steps.when.outputs.friday }} attached.
-            - picklist_highrsi_trend.csv (full ranked list)
-            - top6_preview.txt (human-readable preview)
-            - hi70_thisweek.csv (if present)
-          attachments: |
-            backtests/picklist_highrsi_trend.csv
-            backtests/top6_preview.txt
-            backtests/hi70_thisweek.csv
+          to: ${{ secrets.SMTP_TO }}
+          body: ${{ steps.compose.outputs.body }}
+
 
 
       
