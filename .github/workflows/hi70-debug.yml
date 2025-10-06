@@ -42,6 +42,49 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas requests pyyaml
 
+      - name: Probe Polygon universe (market_cap breakdown)
+        env:
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, requests
+          from datetime import datetime, timedelta
+          from zoneinfo import ZoneInfo
+          from urllib.parse import urlparse, parse_qs
+      
+          key=os.environ["POLYGON_API_KEY"]
+          tz=ZoneInfo("America/New_York")
+          today=datetime.now(tz).date()
+          # same anchor Friday logic the scanner uses in --use-current-week mode
+          mon=today - timedelta(days=today.weekday())
+          fri=mon + timedelta(days=4)
+      
+          url="https://api.polygon.io/v3/reference/tickers"
+          params={"market":"stocks","active":"true","type":"CS","limit":"1000","apiKey":key,"date":fri.isoformat()}
+      
+          results=[]; cursor=None; pages=5
+          for i in range(pages):
+              p=params.copy()
+              if cursor: p["cursor"]=cursor
+              r=requests.get(url, params=p, timeout=30); r.raise_for_status()
+              j=r.json() or {}
+              results.extend(j.get("results",[]) or [])
+              nxt=j.get("next_url") or ""
+              cursor=parse_qs(urlparse(nxt).query).get("cursor",[None])[0] if nxt else None
+              if not cursor: break
+      
+          total=len(results)
+          otc=sum(1 for t in results if str(t.get("primary_exchange","")).upper()=="OTC")
+          missing_mc=sum(1 for t in results if not t.get("market_cap"))
+          ge_1b=sum(1 for t in results if (t.get("market_cap") or 0)>=1_000_000_000)
+      
+          print(f"[probe] date={fri} total={total} otc={otc} missing_mc={missing_mc} >=$1B={ge_1b}")
+          sample=[(t["ticker"], t.get("market_cap")) for t in results if t.get("market_cap")][:10]
+          print("[probe] sample with market_cap:", sample)
+          PY
+
+      
       - name: Scan 70D highs for the CURRENT week
         env:
           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
