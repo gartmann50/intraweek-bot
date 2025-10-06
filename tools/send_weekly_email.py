@@ -59,7 +59,7 @@ def find_picks_file_text() -> Tuple[str, Optional[str]]:
             return (read_text(p).strip() or "(picks file is empty)", p)
     # derive from CSV if present
     if pd is not None:
-        pick_csvs = ["backtests/picklist_highrsi_trend.csv", **glob.glob("**/picklist_highrsi_trend.csv", recursive=True)]
+        pick_csvs = ["backtests/picklist_highrsi_trend.csv"] + glob.glob("**/picklist_highrsi_trend.csv", recursive=True)
         for pc in pick_csvs:
             if not os.path.isfile(pc): continue
             try:
