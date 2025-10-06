@@ -179,7 +179,13 @@ def main() -> None:
 
     fri = last_friday_ny()
     mon = fri + timedelta(days=3)
-    week_end = min(mon + timedelta(days=4), ny_today())
+    today = ny_today()
+    # if we're already in or before that week, push back one week
+    if today < mon:
+        fri -= timedelta(days=7)
+        mon = fri + timedelta(days=3)
+    week_end = min(mon + timedelta(days=4), today)
+
     start = mon - timedelta(days=cfg.since_days)
 
     os.makedirs(cfg.out_dir, exist_ok=True)
