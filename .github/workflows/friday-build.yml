@@ -86,6 +86,26 @@ jobs:
           allow_forks: true
           if_no_artifact_found: warn        # <- don't fail the job if it’s missing
 
+      - name: Probe hi70 artifact contents
+        shell: bash
+        run: |
+          set -e
+          echo "[probe] Listing backtests/"
+          find backtests -maxdepth 2 -type f -name 'hi70_*' -printf '%p  (%s bytes)\n' | sort || true
+          HI70_CSV="$(find backtests -type f -name 'hi70_thisweek.csv' -print -quit || true)"
+          if [ -n "$HI70_CSV" ]; then
+            echo "[probe] Head of $HI70_CSV"
+            sed -n '1,12p' "$HI70_CSV" || true
+            echo "[probe] Row count (excluding header):"
+            awk -F, 'NR>1 && $1!="" {c++} END{print c+0}' "$HI70_CSV" || true
+          fi
+          HI70_TXT="$(find backtests -type f -name 'hi70_digest.txt' -print -quit || true)"
+          if [ -n "$HI70_TXT" ]; then
+            echo "[probe] Head of $HI70_TXT"
+            sed -n '1,12p' "$HI70_TXT" || true
+          fi
+
+
       - name: Options snapshot — Picks (disabled)
         run: echo "Options snapshot disabled for now."
 
