@@ -184,7 +184,9 @@ def main() -> None:
     if today < mon:
         fri -= timedelta(days=7)
         mon = fri + timedelta(days=3)
-    week_end = min(mon + timedelta(days=4), today)
+    
+  week_end = min(mon + timedelta(days=4), today)
+    start = mon - timedelta(days=cfg.since_days)
 
 
     os.makedirs(cfg.out_dir, exist_ok=True)
@@ -278,6 +280,11 @@ def main() -> None:
                 f"first={c.first_break_day or '-'}\n"
             )
 
+    if not topN:
+    print(f"[hi70] No breakouts found for week {ymd(mon)} .. {ymd(week_end)} "
+          f"(universe={total})")
+
+  
     print(f"Candidates: {len(cands)} | wrote {csv_path} and {digest_path}")
 
 if __name__ == "__main__":
