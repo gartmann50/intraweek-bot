@@ -125,6 +125,25 @@ jobs:
           print("SMTP login OK as", u)
           s.quit()
 
+      - name: Probe Gmail SMTP login
+        env:
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          SMTP_TO:   ${{ secrets.SMTP_TO }}
+        run: |
+          python - <<'PY'
+          import os
+          present = [k for k in ("SMTP_HOST","SMTP_PORT","SMTP_USER","SMTP_PASS","SMTP_FROM","SMTP_TO") if os.getenv(k)]
+          missing = [k for k in ("SMTP_HOST","SMTP_PORT","SMTP_USER","SMTP_PASS","SMTP_FROM","SMTP_TO") if not os.getenv(k)]
+          print("[email] present keys:", present)
+          print("[email] missing keys:", missing)
+          if missing: raise SystemExit(1)
+          PY
+
+
       - name: Email weekly summary (picks + 70D highs)
         env:
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
