@@ -1,0 +1,79 @@
+name: hi70-debug (current week)
+
+on:
+  workflow_dispatch:
+    inputs:
+      top:
+        description: "How many tickers to print"
+        required: false
+        default: "10"
+      cap_min:
+        description: "Min market cap USD"
+        required: false
+        default: "1000000000"
+      min_price:
+        description: "Min last close"
+        required: false
+        default: "5"
+      min_dollar_vol:
+        description: "Min dollar volume (last bar)"
+        required: false
+        default: "10000000"
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - run: |
+          python -m pip install --upgrade pip
+          pip install pandas requests pyyaml
+      - name: Scan 70D highs for the CURRENT week
+        env:
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+        run: |
+          python tools/scan_70d_highs.py \
+            --use-current-week \
+            --pages 5 \
+            --since-days 130 \
+            --top "${{ inputs.top }}" \
+            --out-dir backtests \
+            --cap-min "${{ inputs.cap_min }}" \
+            --min-price "${{ inputs.min_price }}" \
+            --min-dollar-vol "${{ inputs.min_dollar_vol }}"
+      - name: Show results (tickers only)
+        id: show
+        shell: bash
+        run: |
+          set -euo pipefail
+          CSV="$(find backtests -type f -name 'hi70_thisweek.csv' -print -quit || true)"
+          if [[ -z "${CSV}" ]]; then
+            echo "No CSV produced."; exit 1
+          fi
+          ROWS=$(awk -F, 'NR>1 && $1!="" {c++} END{print c+0}' "$CSV" || echo 0)
+          echo "[debug] rows=$ROWS"
+          if [[ "$ROWS" -gt 0 ]]; then
+            LIST=$(awk -F, 'NR>1 && $1!="" {print $1}' "$CSV" | head -${{ inputs.top }} | paste -sd "," -)
+            echo "[debug] Top${{ inputs.top }}: $LIST"
+            {
+              echo "HI70_LIST=$LIST"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "[debug] No breakouts found in current week."
+            echo "HI70_LIST=" >> "$GITHUB_OUTPUT"
+          fi
+      - name: (Optional) Send me a quick test email
+        if: ${{ steps.show.outputs.HI70_LIST != '' }}
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 587
+          secure: false
+          username: ${{ secrets.SMTP_USER }}
+          password: ${{ secrets.SMTP_PASS }}
+          subject: "hi70-debug — Top ${{ inputs.top }} (current week)"
+          from: ${{ secrets.SMTP_FROM }}
+          to: ${{ secrets.SMTP_TO }}
+          body: "70D Highs (current week): ${{ steps.show.outputs.HI70_LIST }}"
