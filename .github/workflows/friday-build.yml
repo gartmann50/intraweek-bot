@@ -39,8 +39,11 @@ jobs:
           tz=zoneinfo.ZoneInfo("Europe/Oslo"); now=datetime.now(tz).date()
           while now.weekday()!=4: now-=timedelta(days=1)
           mon=(now+timedelta(days=3)).isoformat()
-          with open("runner_dates.json","w") as f: json.dump({"friday":now.isoformat(),"monday":mon},f)
-          open(os.environ["GITHUB_OUTPUT"],"a").write(f"friday={now}\n")
+          with open("runner_dates.json","w") as f:
+              json.dump({"friday":now.isoformat(),"monday":mon},f)
+          with open(os.environ["GITHUB_OUTPUT"],"a") as g:
+              g.write(f"friday={now}\n")
+              g.write(f"monday={mon}\n")   # <-- add this line
       
       - name: Export WEEK (nominal Monday) for later steps
         run: echo "WEEK=${{ steps.when.outputs.monday }}" >> $GITHUB_ENV
@@ -110,14 +113,25 @@ jobs:
 
 
       - name: Email weekly summary (picks + 70D highs)
-        env:
-          SMTP_HOST: smtp.gmail.com          # explicitly Gmail host
-          SMTP_PORT: "587"                   # use STARTTLS port
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
-          SMTP_FROM: ${{ secrets.SMTP_FROM }}
-          SMTP_TO:   ${{ secrets.SMTP_TO }}
-        run: python -u tools/email_weekly.py
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: smtp.gmail.com
+          server_port: 587              # STARTTLS
+          secure: false                 # important: STARTTLS, not SSL
+          username: ${{ secrets.SMTP_USER }}
+          password: ${{ secrets.SMTP_PASS }}
+          subject: "IW Bot — Weekly Picks ${{ steps.when.outputs.friday }}"
+          from: ${{ secrets.SMTP_FROM }}
+          to:   ${{ secrets.SMTP_TO }}
+          body: |
+            Weekly picks for ${{ steps.when.outputs.friday }} attached.
+            - picklist_highrsi_trend.csv (full ranked list)
+            - top6_preview.txt (human-readable preview)
+            - hi70_thisweek.csv (if present)
+          attachments: |
+            backtests/picklist_highrsi_trend.csv
+            backtests/top6_preview.txt
+            backtests/hi70_thisweek.csv
 
 
       
