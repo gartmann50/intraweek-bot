@@ -94,14 +94,13 @@ jobs:
 
       - name: Compose email body (weekly picks + Top-10 70D highs)
         id: compose
+        shell: bash
         run: |
           set -e
           FRIDAY="${{ steps.when.outputs.friday }}"
       
-          # Top-K preview (already created earlier)
           PREVIEW="$(sed -n '1,80p' backtests/top6_preview.txt || true)"
       
-          # Extract Top-10 symbols from hi70 csv if present
           if [ -f backtests/hi70_thisweek.csv ]; then
             HI70=$(awk -F, 'NR>1 {print $1}' backtests/hi70_thisweek.csv | head -10 | paste -sd "," -)
             HI70_LINE="70D Highs (Top 10): ${HI70}"
@@ -120,12 +119,13 @@ jobs:
             echo "(Files are in the run’s artifact if you need details.)"
           } > email_compose.txt
       
-          # Expose the whole body as a multi-line output
+          # expose multi-line output correctly
           {
-            echo "body<<'EOF'"
+            echo "body<<BODY"
             cat email_compose.txt
-            echo "EOF"
+            echo "BODY"
           } >> "$GITHUB_OUTPUT"
+
 
 
       - name: Email config (from secrets)
