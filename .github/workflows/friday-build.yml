@@ -10,6 +10,11 @@ on:
         description: "Top-K to preview/email"
         required: false
         default: "6"
+      hi70_preview:
+        description: "Optional comma-separated 70D tickers to include (testing only)"
+        required: false
+        default: ""
+        
 
 concurrency:
   group: iwbot-friday-build
@@ -118,37 +123,25 @@ jobs:
         run: |
           set -euo pipefail
           FRIDAY="${{ steps.when.outputs.friday }}"
-      
           PREVIEW="$(sed -n '1,80p' backtests/top6_preview.txt || true)"
       
-          # Try newest CSV first
-          HI70_CSV="$(find backtests -type f -name 'hi70_thisweek.csv' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2- || true)"
-          HI70_LIST=""
-          if [[ -n "${HI70_CSV}" && -f "${HI70_CSV}" ]]; then
-            ROWS=$(awk -F, 'NR>1 && $1!="" {c++} END{print c+0}' "${HI70_CSV}" || echo 0)
-            if [[ "${ROWS}" -gt 0 ]]; then
-              HI70_LIST=$(awk -F, 'NR>1 && $1!="" {print $1}' "${HI70_CSV}" | head -10 | paste -sd "," -)
-              echo "[compose] Using CSV (${ROWS} rows): ${HI70_LIST}"
-            else
-              echo "[compose] CSV present but empty (header-only)."
-            fi
+          # 1) Optional manual override for testing
+          HI70_LIST="${{ inputs.hi70_preview }}"
+          if [[ -n "${HI70_LIST}" ]]; then
+            echo "[compose] Using hi70_preview override: ${HI70_LIST}"
           else
-            echo "[compose] No hi70_thisweek.csv found."
-          fi
-      
-          # Fallback to digest if CSV had no names
-          if [[ -z "${HI70_LIST}" ]]; then
-            HI70_TXT="$(find backtests -type f -name 'hi70_digest.txt' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2- || true)"
-            if [[ -n "${HI70_TXT}" && -f "${HI70_TXT}" ]]; then
-              # Lines look like: " 1. TICKER ..."; capture the ticker
-              HI70_LIST=$(awk 'match($0,/^[[:space:]]*[0-9]+[.)][[:space:]]+([A-Z0-9.-]+)/,m){print m[1]}' "${HI70_TXT}" | head -10 | paste -sd "," - || true)
-              if [[ -n "${HI70_LIST}" ]]; then
-                echo "[compose] Using digest: ${HI70_LIST}"
+            # 2) Otherwise, try newest CSV from artifact (and require rows)
+            HI70_CSV="$(find backtests -type f -name 'hi70_thisweek.csv' -printf '%T@ %p\n' 2>/dev/null | sort -nr | head -1 | cut -d' ' -f2- || true)"
+            if [[ -n "${HI70_CSV}" && -f "${HI70_CSV}" ]]; then
+              ROWS=$(awk -F, 'NR>1 && $1!="" {c++} END{print c+0}' "${HI70_CSV}" || echo 0)
+              if [[ "${ROWS}" -gt 0 ]]; then
+                HI70_LIST=$(awk -F, 'NR>1 && $1!="" {print $1}' "${HI70_CSV}" | head -10 | paste -sd "," -)
+                echo "[compose] Using CSV (${ROWS} rows): ${HI70_LIST}"
               else
-                echo "[compose] Digest found but no tickers parsed."
+                echo "[compose] CSV present but empty; skipping inline list."
               fi
             else
-              echo "[compose] No hi70_digest.txt found."
+              echo "[compose] No hi70_thisweek.csv found; skipping inline list."
             fi
           fi
       
@@ -170,6 +163,7 @@ jobs:
             cat email_compose.txt
             echo "BODY"
           } >> "$GITHUB_OUTPUT"
+
 
 
 
