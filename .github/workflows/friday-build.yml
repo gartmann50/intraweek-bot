@@ -68,13 +68,7 @@ jobs:
             --rsi-min 68 --max-ext20 0.15 --top-per-week 40 \
             --until "${{ steps.when.outputs.friday }}" \
             --out backtests/picklist_highrsi_trend.csv
-    
-      # ensure requests is present (you already have pandas/numpy/pyyaml)
-      - run: |
-          python -m pip install --upgrade pip
-          pip install requests pandas numpy pyyaml
-        # (this may already exist in your job)
-      
+
       # NEW — build dynamic universe (same thresholds as hi70)
       - name: Build dynamic universe (Top-N by $ volume)
         env:
