@@ -55,10 +55,6 @@ jobs:
               f.write(f"friday={d}\n")
               f.write(f"is_monday={'true' if is_monday else 'false'}\n")
 
-      # --- Optional hard guard: only act on Mondays in NY ---
-      - name: Exit if not Monday (NY)
-        if: steps.when.outputs.is_monday != 'true' && github.event_name != 'workflow_dispatch'
-        run: echo "Not Monday in New York; skipping." && exit 0
 
       # --- Duplicate-buy guard per week (keyed by Friday date) ---
       - name: Dup guard for this Friday
