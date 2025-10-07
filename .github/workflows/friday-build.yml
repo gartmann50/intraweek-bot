@@ -148,9 +148,14 @@ jobs:
             BODY+=$'\n\n(no Top-K preview file found)'
           fi
       
-          # Top-10 70D highs tickers (if CSV present)
-          if [[ -f backtests/hi70_thisweek.csv ]]; then
-            TICKERS=$(awk -F, 'NR>1 && $1!="" {print $1}' backtests/hi70_thisweek.csv | head -10 | paste -sd ', ' -)
+          # Locate hi70 CSV (top-level or dated subfolder)
+          CSV=""
+          for p in backtests/hi70_thisweek.csv backtests/hi70-*/hi70_thisweek.csv; do
+            [[ -f "$p" ]] && { CSV="$p"; break; }
+          done
+      
+          if [[ -n "$CSV" ]]; then
+            TICKERS=$(awk -F, 'NR>1 && $1!="" {print $1}' "$CSV" | head -10 | paste -sd ', ' -)
             BODY+=$'\n\nTop-10 70D Highs: '
             if [[ -n "$TICKERS" ]]; then
               BODY+="$TICKERS"
@@ -167,9 +172,10 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_ENV"
       
-          # optional: show a preview in logs
+          echo "[email] using CSV: ${CSV:-'(not found)'}"
           echo "[email] body preview (first 400 chars):"
           echo "${BODY:0:400}"
+
 
 
 
