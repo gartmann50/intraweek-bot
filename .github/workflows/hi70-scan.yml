@@ -69,6 +69,25 @@ jobs:
               d -= timedelta(days=1)
           open("${{ github.output }}","w").write(f"friday={d}\n")
 
+      # build the same universe
+      - name: Build dynamic universe (Top-N by ADV$)
+        env:
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+        run: |
+          python tools/make_universe_topvol.py --adv-days 21 --topvol 1000 --min-price 5 --out-dir backtests
+      
+      # pass allow-file when scanning
+      - name: Scan 70D highs (shared universe)
+        env:
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+        run: |
+          python tools/scan_70d_highs.py \
+            --since-days 130 \
+            --top 10 \
+            --out-dir backtests \
+            --allow-file backtests/universe_topvol.txt
+
+
       - name: Scan 70D highs (full market → top by $ volume)
         env:
           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
