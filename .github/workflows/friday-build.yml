@@ -152,21 +152,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          shopt -s nullglob
       
-          echo "[debug] listing backtests/"
-          ls -la backtests || true
+          echo "[debug] list hi70 files under backtests/"
+          find backtests -maxdepth 2 -type f -name 'hi70_*' -printf '%p\n' | sort || true
       
-          # locate the CSV (either top-level or in a dated artifact folder)
-          files=( backtests/hi70_thisweek.csv backtests/hi70-*/hi70_thisweek.csv )
-          if [[ ${#files[@]} -eq 0 ]]; then
+          # Locate the CSV anywhere under backtests/ (top-level or dated subfolder)
+          CSV="$(find backtests -maxdepth 2 -type f -name 'hi70_thisweek.csv' -print -quit || true)"
+          if [[ -z "${CSV}" ]]; then
             echo "[hi70] hi70_thisweek.csv not found (artifact may be missing) — skipping filter."
             exit 0
           fi
-          CSV="${files[0]}"
-          echo "[hi70] using CSV: $CSV"
+          echo "[hi70] using CSV: ${CSV}"
       
-          # ensure universe file exists
+          # Require the shared universe
           if [[ ! -f backtests/universe_topvol.txt ]]; then
             echo "[hi70] backtests/universe_topvol.txt missing — skipping filter."
             exit 0
@@ -174,11 +172,12 @@ jobs:
       
           python tools/filter_picklist_by_symbols.py \
             backtests/universe_topvol.txt \
-            "$CSV" \
-            "$CSV"
+            "${CSV}" \
+            "${CSV}"
       
           echo "[hi70] head after filter:"
-          sed -n '1,12p' "$CSV"
+          sed -n '1,12p' "${CSV}"
+      
 
       
 
