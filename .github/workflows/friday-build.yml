@@ -136,43 +136,35 @@ jobs:
       - name: Compose email body (weekly picks + Top-10 70D highs)
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
+      
           BODY="IW Bot — Weekly picks for ${{ steps.when.outputs.friday }}"
       
-          # Add the Top-K preview if present
-          if [ -f backtests/top6_preview.txt ]; then
-            BODY="$BODY
-      
-      $(cat backtests/top6_preview.txt)"
+          # Top-K preview (if present)
+          if [[ -f backtests/top6_preview.txt ]]; then
+            BODY+=$'\n\n'
+            BODY+="$(< backtests/top6_preview.txt)"
           else
-            BODY="$BODY
-      
-      (no Top-K preview file found)"
+            BODY+=$'\n\n(no Top-K preview file found)'
           fi
       
-          # Add Top-10 70D highs tickers if we have the CSV
-          if [ -f backtests/hi70_thisweek.csv ]; then
+          # Top-10 70D highs tickers (if CSV present)
+          if [[ -f backtests/hi70_thisweek.csv ]]; then
             TICKERS=$(awk -F, 'NR>1 && $1!="" {print $1}' backtests/hi70_thisweek.csv | head -10 | paste -sd ', ' -)
-            if [ -n "$TICKERS" ]; then
-              BODY="$BODY
-      
-      Top-10 70D Highs: $TICKERS"
+            BODY+=$'\n\nTop-10 70D Highs: '
+            if [[ -n "$TICKERS" ]]; then
+              BODY+="$TICKERS"
             else
-              BODY="$BODY
-      
-      Top-10 70D Highs: (none this week)"
+              BODY+='(none this week)'
             fi
           else
-            echo "[warn] No hi70_thisweek.csv found."
-            BODY="$BODY
-      
-      Top-10 70D Highs: (files not found in this run)"
+            BODY+=$'\n\nTop-10 70D Highs: (files not found in this run)'
           fi
       
           {
-            echo 'EMAIL_BODY<<EOF'
-            echo "$BODY"
-            echo 'EOF'
+            echo "EMAIL_BODY<<'EOF'"
+            printf '%s\n' "$BODY"
+            echo "EOF"
           } >> "$GITHUB_ENV"
 
 
