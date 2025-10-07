@@ -62,19 +62,55 @@ jobs:
            with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"friday={d}\n")
 
-      # Download the picklist artifact produced by friday-build.yml
-      - name: Download latest weekly picks
-        id: dl_picks
-        uses: dawidd6/action-download-artifact@v2
-        with:
-          repo: ${{ github.repository }}
-          workflow: friday-build.yml
-          branch: main
-          workflow_conclusion: success
-          name: ^weekly-picks-${{ steps.when.outputs.friday }}$
-          name_is_regexp: true
-          path: backtests
-          if_no_artifact_found: fail
+      - name: Gate to after U.S. close (NY)
+        env:
+          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          ALPACA_ENV:    paper
+        shell: python
+        run: |
+          import os, time, requests, datetime as dt
+          from zoneinfo import ZoneInfo
+      
+          ny = ZoneInfo("America/New_York")
+          base = "https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
+          H = {"APCA-API-KEY-ID": os.environ["ALPACA_KEY"], "APCA-API-SECRET-KEY": os.environ["ALPACA_SECRET"]}
+      
+          now = dt.datetime.now(ny)
+          today = now.date().isoformat()
+      
+          # today's calendar (close time in local exchange time, i.e., NY)
+          cal = requests.get(f"{base}/v2/calendar", params={"start": today, "end": today}, headers=H, timeout=20).json()
+          if not cal:
+              print("No calendar for today; skipping gate.")
+              raise SystemExit(0)
+      
+          close_str = f"{cal[0]['date']} {cal[0]['close']}"  # e.g. '2025-10-07 16:00'
+          close_at = dt.datetime.strptime(close_str, "%Y-%m-%d %H:%M").replace(tzinfo=ny)
+      
+          # wait until 60s after close, but cap sleep at 2h for safety
+          target = close_at + dt.timedelta(seconds=60)
+          wait = (target - now).total_seconds()
+          if wait > 0 and wait <= 7200:
+              print(f"Waiting {int(wait)}s until after close…")
+              time.sleep(int(wait))
+          else:
+              print("Already past close; continuing.")
+      
+      
+            # Download the picklist artifact produced by friday-build.yml
+            - name: Download latest weekly picks
+              id: dl_picks
+              uses: dawidd6/action-download-artifact@v2
+              with:
+                repo: ${{ github.repository }}
+                workflow: friday-build.yml
+                branch: main
+                workflow_conclusion: success
+                name: ^weekly-picks-${{ steps.when.outputs.friday }}$
+                name_is_regexp: true
+                path: backtests
+                if_no_artifact_found: fail
 
       - name: Normalize picklist path (copy to backtests/)
         shell: bash
