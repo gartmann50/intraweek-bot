@@ -71,6 +71,156 @@ jobs:
               d -= timedelta(days=1)
           open("${{ github.output }}","w").write(f"friday={d}\n")
 
+      - name: Hotfix:write updated scan_70d_highs.py that supports --topvol
+        shell: bash
+        run: |
+          set -e
+          mkdir -p tools
+          cat > tools/scan_70d_highs.py <<'PY'
+          #!/usr/bin/env python3
+          from __future__ import annotations
+          import argparse, csv, os, sys, time, requests
+          from dataclasses import dataclass
+          from datetime import date, datetime, timedelta
+          from typing import Dict, List, Optional, Tuple
+          from urllib.parse import urlparse, parse_qs
+          from collections import Counter
+          try:
+              from zoneinfo import ZoneInfo
+          except Exception:
+              from backports.zoneinfo import ZoneInfo  # type: ignore
+          
+          NY = ZoneInfo("America/New_York")
+          POLY_TICKERS = "https://api.polygon.io/v3/reference/tickers"
+          POLY_AGGS    = "https://api.polygon.io/v2/aggs/ticker/{sym}/range/1/day/{start}/{end}"
+          POLY_GROUPED = "https://api.polygon.io/v2/aggs/grouped/locale/us/market/stocks/{d}"
+          
+          def ny_today() -> date: return datetime.now(NY).date()
+          def last_friday_ny() -> date:
+              d = ny_today()
+              while d.weekday()!=4: d -= timedelta(days=1)
+              return d
+          def ymd(d: date) -> str: return d.isoformat()
+          def backoff_sleep(k: int) -> None: time.sleep(min(0.5*(2**k), 6.0))
+          def http_get_json(url: str, params: Dict[str,str], max_tries: int = 6) -> Dict:
+              last=None
+              for k in range(max_tries):
+                  try:
+                      r=requests.get(url, params=params, timeout=30)
+                      if r.status_code==429: backoff_sleep(k); continue
+                      r.raise_for_status(); return r.json() or {}
+                  except requests.HTTPError as e:
+                      last=e
+                      if r.status_code>=500: backoff_sleep(k); continue
+                      break
+                  except Exception as e:
+                      last=e; backoff_sleep(k)
+              raise RuntimeError(f"GET failed {url} ({last})")
+          
+          def list_common_stocks_all(api_key: str, on_date: Optional[date]) -> List[Dict]:
+              params={"market":"stocks","active":"true","type":"CS","limit":"1000","apiKey":api_key}
+              if on_date: params["date"]=ymd(on_date)
+              results: List[Dict]=[]; cursor=None
+              while True:
+                  p=dict(params); 
+                  if cursor: p["cursor"]=cursor
+                  j=http_get_json(POLY_TICKERS, p)
+                  results.extend(j.get("results",[]) or [])
+                  nxt=j.get("next_url") or ""
+                  cursor=parse_qs(urlparse(nxt).query).get("cursor",[None])[0] if nxt else None
+                  if not cursor: break
+              return results
+          
+          def fetch_grouped_daily(api_key: str, d: date) -> Dict[str, Tuple[float,float,float]]:
+              url=POLY_GROUPED.format(d=ymd(d)); params={"adjusted":"true","apiKey":api_key}
+              j=http_get_json(url, params); data={}
+              for r in j.get("results",[]) or []:
+                  sym=str(r.get("T") or "").upper()
+                  c=float(r.get("c",0) or 0); v=float(r.get("v",0) or 0)
+                  if sym: data[sym]=(c,v,c*v)
+              return data
+          
+          def fetch_daily_bars(api_key: str, symbol: str, start: date, end: date) -> List[Dict]:
+              url=POLY_AGGS.format(sym=symbol,start=ymd(start),end=ymd(end))
+              j=http_get_json(url, {"adjusted":"true","sort":"asc","limit":"50000","apiKey":api_key})
+              return j.get("results",[]) or []
+          
+          @dataclass
+          class Candidate:
+              symbol:str; name:str; market_cap:float
+              prior70h:float; week_high:float; week_close:float
+              gap_high_pct:float; gap_close_pct:float
+              first_break_day:str; bars:int
+          
+          def detect_week_breakout(bars: List[Dict], mon: date, week_end: date) -> Tuple[float,float,float,float,str]:
+              if not bars: return (0,0,0,0,"")
+              as_date=lambda ms: datetime.utcfromtimestamp(ms/1000).date()
+              before,during=[],[]
+              for b in bars:
+                  d=as_date(int(b.get("t",0)))
+                  if d<mon: before.append(b)
+                  elif mon<=d<=week_end: during.append(b)
+              if not before or not during: return (0,0,0,0,"")
+              prev=before[-70:] if len(before)>=70 else before
+              if not prev: return (0,0,0,0,"")
+              prior70h=max(float(x.get("h",0) or 0) for x in prev)
+              week_high=max(float(x.get("h",0) or 0) for x in during)
+              week_close=float(during[-1].get("c",0) or 0)
+              first=""
+              for x in during:
+                  h=float(x.get("h",0) or 0); c=float(x.get("c",0) or 0)
+                  if h>=prior70h or c>=prior70h:
+                      first=ymd(datetime.utcfromtimestamp(int(x.get("t",0))/1000).date()); break
+              gap_h=0.0 if prior70h<=0 else (week_high/prior70h-1.0)*100.0
+              gap_c=0.0 if prior70h<=0 else (week_close/prior70h-1.0)*100.0
+              return (prior70h,week_high,week_close,max(gap_h,gap_c),first)
+          
+          def parse_args()->argparse.Namespace:
+              p=argparse.ArgumentParser(description="Scan 70D highs for a chosen week window.")
+              p.add_argument("--api-key",default=os.getenv("POLYGON_API_KEY",""))
+              p.add_argument("--since-days",type=int,default=130)
+              p.add_argument("--pages",type=int,default=9999)
+              p.add_argument("--top",type=int,default=10)
+              p.add_argument("--topcap",type=int,default=0)
+              p.add_argument("--cap-min",type=float,default=1_000_000_000.0)
+              p.add_argument("--min-price",type=float,default=5.0)
+              p.add_argument("--min-dollar-vol",type=float,default=10_000_000.0)
+              p.add_argument("--topvol",type=int,default=1000,help="Keep top N by dollar volume (0=all)")
+              p.add_argument("--universe-method",default="marketcap")
+              p.add_argument("--anchor-friday",type=str,default="")
+              p.add_argument("--use-current-week",action="store_true")
+              p.add_argument("--out-dir",default="backtests")
+              return p.parse_args()
+          
+          def main()->None:
+              cfg=parse_args()
+              key=(cfg.api_key or os.getenv("POLYGON_API_KEY") or "").strip()
+              if not key: sys.exit("FATAL: missing Polygon API key (POLYGON_API_KEY).")
+              today=ny_today()
+              if cfg.anchor_friday:
+                  fri=date.fromisoformat(cfg.anchor_friday); mon=fri+timedelta(days=3); week_end=min(mon+timedelta(days=4),today)
+              elif cfg.use_current_week:
+                  mon=today-timedelta(days=today.weekday()); fri=mon+timedelta(days=4); week_end=min(today,fri)
+              else:
+                  fri=last_friday_ny(); mon=fri+timedelta(days=3)
+                  if today<mon: fri-=timedelta(days=7); mon=fri+timedelta(days=3)
+                  week_end=min(mon+timedelta(days=4),today)
+              start=mon-timedelta(days=cfg.since_days)
+              os.makedirs(cfg.out_dir,exist_ok=True)
+              print(f"Week window: {ymd(mon)} .. {ymd(week_end)} | bars from {ymd(start)} .. {ymd(week_end)}")
+          
+              tickers=list_common_stocks_all(key,on_date=None)
+              print(f"Fetched {len(tickers)} active common stocks (all pages).")
+              gd=fetch_grouped_daily(key, week_end)
+              print(f"Grouped-daily rows for {ymd(week_end)}: {len(gd)}")
+          
+              refs: List[Tuple[str,str,float,float]]=[]
+              for t in tickers:
+                  sym=str(t.get("ticker") or "").upper().strip()
+                  if not sym: continue
+                  if (t.get("primary_exchange") or "").upper()=="OTC": cont_
+
+
       - name: Scan 70D highs (full market → top by $ volume)
         env:
           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
