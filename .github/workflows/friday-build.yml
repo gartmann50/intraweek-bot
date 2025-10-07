@@ -80,6 +80,19 @@ jobs:
             --min-price 5 \
             --min-dollar-vol 10000000 \
             --out-dir backtests
+
+      - name: Filter:light short-term trend (no ≥2 consecutive down weeks)
+        env:
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+        run: |
+          python tools/filter_trend_light.py \
+            --picklist backtests/picklist_highrsi_trend.csv \
+            --out      backtests/picklist_highrsi_trend.csv \
+            --anchor-friday "${{ steps.when.outputs.friday }}" \
+            --weeks 4 \
+            --max-consecutive-down 1 \
+            --down-eps 0.002
+
       
       # NEW — filter picklist to that universe (no ranking changes)
       - name: Filter picklist by dynamic universe
