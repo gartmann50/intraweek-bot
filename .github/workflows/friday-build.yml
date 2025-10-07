@@ -179,24 +179,6 @@ jobs:
           sed -n '1,12p' "${CSV}"
       
 
-      
-
-      - name: Append Top-10 70D highs to email body
-        shell: bash
-        run: |
-          set -e
-          if [ -f backtests/hi70_thisweek.csv ]; then
-            TICKERS=$(awk -F, 'NR>1 && $1!="" {print $1}' backtests/hi70_thisweek.csv | head -10 | paste -sd ', ' -)
-            {
-              echo 'EMAIL_BODY<<EOF'
-              echo -e "${EMAIL_BODY}\n\nTop-10 70D highs: ${TICKERS}"
-              echo 'EOF'
-            } >> "$GITHUB_ENV"
-            echo "[email] Added 70D list: ${TICKERS}"
-          else
-            echo "[email] hi70 CSV not found; leaving email body as-is."
-          fi
-
 
       - name: Options snapshot — Picks (disabled)
         run: echo "Options snapshot disabled for now."
