@@ -164,21 +164,24 @@ jobs:
           set -euo pipefail
           shopt -s nullglob
       
-          # find the CSV in either top-level or dated artifact folder
-          files=(backtests/hi70_thisweek.csv backtests/hi70-*/hi70_thisweek.csv)
+          echo "[debug] listing backtests/"
+          ls -la backtests || true
+      
+          # locate the CSV (either top-level or in a dated artifact folder)
+          files=( backtests/hi70_thisweek.csv backtests/hi70-*/hi70_thisweek.csv )
           if [[ ${#files[@]} -eq 0 ]]; then
-            echo "[hi70] hi70_thisweek.csv not found yet — skipping filter."
+            echo "[hi70] hi70_thisweek.csv not found (artifact may be missing) — skipping filter."
             exit 0
           fi
           CSV="${files[0]}"
           echo "[hi70] using CSV: $CSV"
       
-          # require universe file to exist too
+          # ensure universe file exists
           if [[ ! -f backtests/universe_topvol.txt ]]; then
             echo "[hi70] backtests/universe_topvol.txt missing — skipping filter."
             exit 0
           fi
-
+      
           python tools/filter_picklist_by_symbols.py \
             backtests/universe_topvol.txt \
             "$CSV" \
@@ -186,6 +189,7 @@ jobs:
       
           echo "[hi70] head after filter:"
           sed -n '1,12p' "$CSV"
+
       
 
       - name: Append Top-10 70D highs to email body
