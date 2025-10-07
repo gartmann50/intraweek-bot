@@ -70,7 +70,7 @@ jobs:
             --out backtests/picklist_highrsi_trend.csv
 
       # NEW — build dynamic universe (same thresholds as hi70)
-      - name: Build dynamic universe (Top-N by $ volume)
+      - name: Build dynamic universe (Top-N by ADV$)
         env:
           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
         run: |
@@ -79,8 +79,9 @@ jobs:
             --topvol 1000 \
             --min-price 5 \
             --out-dir backtests
-          echo "[universe] count:" $(wc -l < backtests/universe_topvol.txt)
+          echo "[universe] count: $(wc -l < backtests/universe_topvol.txt)"
           sed -n '1,8p' backtests/universe_topvol.csv
+
 
 
       - name: Filter:light short-term trend (no ≥2 consecutive down weeks)
@@ -103,6 +104,16 @@ jobs:
             backtests/universe_topvol.txt \
             backtests/picklist_highrsi_trend.csv \
             backtests/picklist_highrsi_trend.csv
+
+
+      - name: Filter hi70 results to shared universe
+        run: |
+          python tools/filter_picklist_by_symbols.py \
+            backtests/universe_topvol.txt \
+            backtests/hi70_thisweek.csv \
+            backtests/hi70_thisweek.csv
+          echo "[hi70] head after filter:"
+          sed -n '1,12p' backtests/hi70_thisweek.csv
 
       
       - name: Preview Top-K (save file)
