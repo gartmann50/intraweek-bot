@@ -158,6 +158,30 @@ jobs:
             sed -n '1,12p' "$HI70_TXT" || true
           fi
 
+      - name: Filter hi70 results to shared universe
+        shell: bash
+        run: |
+          set -e
+          # find the CSV (top-level or dated artifact folder)
+          CSV=""
+          for p in backtests/hi70_thisweek.csv backtests/hi70-*/hi70_thisweek.csv; do
+            [[ -f "$p" ]] && { CSV="$p"; break; }
+          done
+      
+          if [[ -z "$CSV" ]]; then
+            echo "[hi70] hi70_thisweek.csv not found yet — skipping filter."
+            exit 0
+          fi
+      
+          python tools/filter_picklist_by_symbols.py \
+            backtests/universe_topvol.txt \
+            "$CSV" \
+            "$CSV"
+      
+          echo "[hi70] head after filter:"
+          sed -n '1,12p' "$CSV"
+
+
       - name: Append Top-10 70D highs to email body
         shell: bash
         run: |
