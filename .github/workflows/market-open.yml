@@ -163,16 +163,23 @@ jobs:
           fi
 
       - name: Decide if first session after Friday
-        if: ${{ steps.gate.outputs.go == '1' }}
         id: buygate
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
           ALPACA_ENV:    paper
+          FORCE_BUY:     ${{ github.event.inputs.force_buy }}   # <-- add this
         shell: python
         run: |
           import os,requests,datetime as dt
           from zoneinfo import ZoneInfo
+      
+          # Bypass when force_buy is set
+          if str(os.getenv("FORCE_BUY","false")).lower()=="true":
+              open(os.environ["GITHUB_OUTPUT"],"a").write("do=1\n")
+              print("force_buy=true → setting buygate.do=1")
+              raise SystemExit(0)
+
           base="https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
           H={"APCA-API-KEY-ID":os.environ["ALPACA_KEY"],"APCA-API-SECRET-KEY":os.environ["ALPACA_SECRET"]}
           friday="${{ steps.when.outputs.friday }}"
@@ -184,6 +191,7 @@ jobs:
           do="1" if first and today==first else "0"
           open(os.environ["GITHUB_OUTPUT"],"a").write(f"do={do}\n")
           print("first:",first,"today:",today,"BUY=",do)
+
 
       - name: Prepare buy list (Top-K) — skip names already held / ordered
         id: buylist
