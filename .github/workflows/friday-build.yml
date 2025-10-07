@@ -75,11 +75,13 @@ jobs:
           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
         run: |
           python tools/make_universe_topvol.py \
+            --adv-days 21 \
             --topvol 1000 \
-            --cap-min 1000000000 \
             --min-price 5 \
-            --min-dollar-vol 10000000 \
             --out-dir backtests
+          echo "[universe] count:" $(wc -l < backtests/universe_topvol.txt)
+          sed -n '1,8p' backtests/universe_topvol.csv
+
 
       - name: Filter:light short-term trend (no ≥2 consecutive down weeks)
         env:
