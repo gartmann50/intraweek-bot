@@ -30,6 +30,7 @@ from datetime import date, datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse, parse_qs
 from collections import Counter
+from typing import Tuple
 
 try:
     from zoneinfo import ZoneInfo
@@ -92,6 +93,20 @@ def list_common_stocks_all(api_key: str, on_date: Optional[date]) -> List[Dict]:
         cursor = parse_qs(urlparse(nxt).query).get("cursor", [None])[0] if nxt else None
         if not cursor: break
     return results
+
+def fetch_grouped_daily_with_fallback(api_key: str, end_date: date, lookback_days: int = 7) -> Tuple[date, Dict[str, Tuple[float, float, float]]]:
+    """
+    Try grouped-daily for end_date; if empty, step backward day-by-day
+    up to lookback_days and return the first non-empty snapshot.
+    """
+    d = end_date
+    for _ in range(lookback_days):
+        gd = fetch_grouped_daily(api_key, d)
+        if gd:  # found data
+            return d, gd
+        d -= timedelta(days=1)
+    return end_date, {}
+
 
 def fetch_grouped_daily(api_key: str, d: date) -> Dict[str, Tuple[float, float, float]]:
     """Return {symbol: (close, volume, dollar_vol)} for a single day."""
@@ -202,8 +217,17 @@ def main() -> None:
     print(f"Fetched {len(tickers)} active common stocks (all pages).")
 
     # 2) Liquidity map for week_end
-    gd = fetch_grouped_daily(key, week_end)
-    print(f"Grouped-daily rows for {ymd(week_end)}: {len(gd)}")
+    gd_date, gd = fetch_grouped_daily_with_fallback(key, week_end, lookback_days=7)
+    print(f"Grouped-daily rows: {len(gd)} on {ymd(gd_date)} (requested {ymd(week_end)})")
+    if not gd:
+        # Nothing to rank by $-volume — write empty outputs and exit gracefully
+        os.makedirs(cfg.out_dir, exist_ok=True)
+        with open(os.path.join(cfg.out_dir, "hi70_thisweek.csv"), "w", encoding="utf-8") as f:
+            f.write("symbol,name,market_cap,prior70h,week_high,week_close,gap_high_pct,gap_close_pct,first_break_day,bars\n")
+        with open(os.path.join(cfg.out_dir, "hi70_digest.txt"), "w", encoding="utf-8") as f:
+            f.write(f"hi70 scan — week {ymd(mon)} .. {ymd(week_end)} (anchor Friday={ymd(fri)})\n")
+            f.write("No grouped-daily data available (likely pre-open/holiday). Scan skipped.\n")
+        return
 
     # 3) Build refs with filters, keep Top-N by dollar volume
     refs: List[Tuple[str, str, float, float]] = []  # (sym, name, mc, dv)
