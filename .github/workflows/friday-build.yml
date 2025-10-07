@@ -106,16 +106,6 @@ jobs:
             backtests/picklist_highrsi_trend.csv
 
 
-      - name: Filter hi70 results to shared universe
-        run: |
-          python tools/filter_picklist_by_symbols.py \
-            backtests/universe_topvol.txt \
-            backtests/hi70_thisweek.csv \
-            backtests/hi70_thisweek.csv
-          echo "[hi70] head after filter:"
-          sed -n '1,12p' backtests/hi70_thisweek.csv
-
-      
       - name: Preview Top-K (save file)
         run: |
           set -e
