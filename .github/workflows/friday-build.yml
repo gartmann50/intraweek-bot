@@ -162,10 +162,15 @@ jobs:
           fi
       
           {
-            echo "EMAIL_BODY<<'EOF'"
+            echo "EMAIL_BODY<<EOF"
             printf '%s\n' "$BODY"
             echo "EOF"
           } >> "$GITHUB_ENV"
+      
+          # optional: show a preview in logs
+          echo "[email] body preview (first 400 chars):"
+          echo "${BODY:0:400}"
+
 
 
 
