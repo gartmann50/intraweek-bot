@@ -195,33 +195,22 @@ jobs:
             BODY+=$'\n\n(no Top-K preview file found)'
           fi
       
-          # Locate hi70 CSV (top-level or dated subfolder)
-          CSV=""
-          for p in backtests/hi70_thisweek.csv backtests/hi70-*/hi70_thisweek.csv; do
-            [[ -f "$p" ]] && { CSV="$p"; break; }
-          done
-      
-          if [[ -n "$CSV" ]]; then
-            TICKERS=$(awk -F, 'NR>1 && $1!="" {print $1}' "$CSV" | head -10 | paste -sd ', ' -)
+          # <<< INSERT THIS BLOCK >>>
+          if [[ -n "${HI70_CSV:-}" && -f "${HI70_CSV}" ]]; then
+            TICKERS=$(awk -F, 'NR>1 && $1!="" {print $1}' "$HI70_CSV" | head -10 | paste -sd ', ' -)
             BODY+=$'\n\nTop-10 70D Highs: '
-            if [[ -n "$TICKERS" ]]; then
-              BODY+="$TICKERS"
-            else
-              BODY+='(none this week)'
-            fi
+            BODY+="${TICKERS:-'(none this week)'}"
           else
             BODY+=$'\n\nTop-10 70D Highs: (files not found in this run)'
           fi
+          # <<< END INSERT >>>
       
           {
             echo "EMAIL_BODY<<EOF"
             printf '%s\n' "$BODY"
             echo "EOF"
           } >> "$GITHUB_ENV"
-      
-          echo "[email] using CSV: ${CSV:-'(not found)'}"
-          echo "[email] body preview (first 400 chars):"
-          echo "${BODY:0:400}"
+
 
 
 
