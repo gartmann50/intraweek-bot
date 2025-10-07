@@ -336,7 +336,7 @@ jobs:
           open(os.environ['GITHUB_ENV'], 'a').write(f'WEEK={week}\n')
 
       - name: Buy once (long-only)
-        if: ${{ steps.gate.outputs.go == '1' && steps.buygate.outputs.do == '1' && steps.buylist.outputs.any == '1' }}
+        if: ${{ steps.gate.outputs.go == '1' && (steps.buygate.outputs.do == '1' || github.event.inputs.force_buy == 'true') && steps.buylist.outputs.any == '1' }}
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
@@ -345,10 +345,10 @@ jobs:
           TOPK:          ${{ env.TOPK || '6' }}
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
           echo "NOTIONAL_PER=$NOTIONAL_PER"
           echo "WEEK=$WEEK  TOPK=${TOPK}"
-
+      
           # Gate to open (so DAY orders don’t get rejected)
           python - <<'PY'
           import os, sys, time, requests, datetime as dt
@@ -366,15 +366,27 @@ jobs:
               print(f"Market closed; sleeping {int(wait)}s until open...")
               time.sleep(int(wait))
           PY
-
-          # ✅ Buy from the filtered list we built earlier
+      
+          # Build a synthetic picklist CSV from the filtered symbols
+          if [[ ! -s backtests/buy_symbols.txt ]]; then
+            echo "No symbols to buy"; exit 0
+          fi
+          awk -v wk="$WEEK" 'BEGIN{print "symbol,week"} NF{print $0","wk}' \
+            backtests/buy_symbols.txt > backtests/buylist.csv
+          echo "[buy] using picklist:"
+          cat backtests/buylist.csv
+      
+          # Call existing CLI that requires --picklist and --week
           python execute_orders.py \
             --broker alpaca \
             --data-dir stock_data_400 \
-            --symbols-file backtests/buy_symbols.txt \
+            --picklist backtests/buylist.csv \
+            --week "$WEEK" \
+            --topk 999 \
             --side buy \
             --notional "${NOTIONAL_PER}" \
             --init-stop-atr-mult 1.75
+
 
       - name: Show Alpaca positions (paper)
         env:
