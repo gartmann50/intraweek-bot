@@ -148,35 +148,29 @@ jobs:
             sed -n '1,12p' "$HI70_TXT" || true
           fi
 
-      - name: Filter hi70 results to shared universe
+      - name: Locate hi70 CSV (set $HI70_CSV)
         shell: bash
         run: |
           set -euo pipefail
-      
-          echo "[debug] list hi70 files under backtests/"
-          find backtests -maxdepth 2 -type f -name 'hi70_*' -printf '%p\n' | sort || true
-      
-          # Locate the CSV anywhere under backtests/ (top-level or dated subfolder)
           CSV="$(find backtests -maxdepth 2 -type f -name 'hi70_thisweek.csv' -print -quit || true)"
-          if [[ -z "${CSV}" ]]; then
-            echo "[hi70] hi70_thisweek.csv not found (artifact may be missing) — skipping filter."
-            exit 0
+          if [[ -n "$CSV" ]]; then
+            echo "HI70_CSV=$CSV" >> "$GITHUB_ENV"
+            echo "[hi70] found: $CSV"
+            sed -n '1,12p' "$CSV" || true
+          else
+            echo "[hi70] CSV not found."
           fi
-          echo "[hi70] using CSV: ${CSV}"
-      
-          # Require the shared universe
-          if [[ ! -f backtests/universe_topvol.txt ]]; then
-            echo "[hi70] backtests/universe_topvol.txt missing — skipping filter."
-            exit 0
-          fi
-      
+
+
+      - name: Filter hi70 results to shared universe
+        if: env.HI70_CSV != ''
+        run: |
           python tools/filter_picklist_by_symbols.py \
             backtests/universe_topvol.txt \
-            "${CSV}" \
-            "${CSV}"
-      
-          echo "[hi70] head after filter:"
-          sed -n '1,12p' "${CSV}"
+            "$HI70_CSV" \
+            "$HI70_CSV"
+          sed -n '1,12p' "$HI70_CSV"
+
       
 
 
