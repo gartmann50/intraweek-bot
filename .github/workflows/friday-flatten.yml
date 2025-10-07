@@ -50,6 +50,29 @@ jobs:
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
           ALPACA_ENV:    paper
 
+      - name: Cancel all open orders (safety before flatten)
+        env:
+          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          ALPACA_ENV:    paper
+        shell: python
+        run: |
+          import os, time, requests
+          base = "https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
+          H = {"APCA-API-KEY-ID": os.environ["ALPACA_KEY"], "APCA-API-SECRET-KEY": os.environ["ALPACA_SECRET"]}
+      
+          # Cancel all open orders
+          r = requests.delete(f"{base}/v2/orders", headers=H, timeout=20)
+          print("cancel open orders status:", r.status_code)
+      
+          # Wait until the cancels settle (keeps flatten from racing)
+          for _ in range(10):
+              q = requests.get(f"{base}/v2/orders", params={"status":"open","limit":1}, headers=H, timeout=20).json()
+              if not q:
+                  print("no open orders remaining."); break
+              time.sleep(1.0)
+
+
       - name: Flatten positions (MOC on schedule; DAY if forced)
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
