@@ -134,25 +134,46 @@ jobs:
         run: echo "Options snapshot disabled for now."
 
       - name: Compose email body (weekly picks + Top-10 70D highs)
-        id: compose
         shell: bash
         run: |
           set -e
+          BODY="IW Bot — Weekly picks for ${{ steps.when.outputs.friday }}"
       
-          BODY="Weekly picks for ${{ steps.when.outputs.friday }} attached.\n\n"
+          # Add the Top-K preview if present
+          if [ -f backtests/top6_preview.txt ]; then
+            BODY="$BODY
       
-          if [ -f backtests/hi70_digest.txt ]; then
-            echo "[debug] Including hi70_digest.txt content"
-            BODY+="Top 70D Highs (from hi70_digest.txt):\n"
-            BODY+="$(head -n 20 backtests/hi70_digest.txt)\n"
+      $(cat backtests/top6_preview.txt)"
           else
-            echo "[warn] No hi70_digest.txt found."
-            BODY+="(No 70D high breakouts found this week.)\n"
+            BODY="$BODY
+      
+      (no Top-K preview file found)"
           fi
       
-          echo "body<<EOF" >> $GITHUB_OUTPUT
-          echo -e "$BODY" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
+          # Add Top-10 70D highs tickers if we have the CSV
+          if [ -f backtests/hi70_thisweek.csv ]; then
+            TICKERS=$(awk -F, 'NR>1 && $1!="" {print $1}' backtests/hi70_thisweek.csv | head -10 | paste -sd ', ' -)
+            if [ -n "$TICKERS" ]; then
+              BODY="$BODY
+      
+      Top-10 70D Highs: $TICKERS"
+            else
+              BODY="$BODY
+      
+      Top-10 70D Highs: (none this week)"
+            fi
+          else
+            echo "[warn] No hi70_thisweek.csv found."
+            BODY="$BODY
+      
+      Top-10 70D Highs: (files not found in this run)"
+          fi
+      
+          {
+            echo 'EMAIL_BODY<<EOF'
+            echo "$BODY"
+            echo 'EOF'
+          } >> "$GITHUB_ENV"
 
 
 
@@ -177,6 +198,23 @@ jobs:
             to:   ${{ secrets.SMTP_TO }}
             YAML
 
+      - name: Probe Gmail SMTP login
+        shell: python
+        env:
+          SMTP_HOST: smtp.gmail.com
+          SMTP_PORT: "587"
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+        run: |
+          import os, smtplib
+          missing=[k for k in ["SMTP_HOST","SMTP_PORT","SMTP_USER","SMTP_PASS"] if not os.getenv(k)]
+          print("[email] present keys:", [k for k in ["SMTP_HOST","SMTP_PORT","SMTP_USER","SMTP_PASS"] if os.getenv(k)])
+          print("[email] missing keys:", missing)
+          if missing: raise SystemExit("Missing SMTP secrets")
+          with smtplib.SMTP(os.environ["SMTP_HOST"], int(os.environ["SMTP_PORT"])) as s:
+              s.ehlo(); s.starttls(); s.ehlo()
+              s.login(os.environ["SMTP_USER"], os.environ["SMTP_PASS"])
+          print("SMTP login OK ✅")
 
 
       - name: Email weekly summary (picks + 70D highs)
