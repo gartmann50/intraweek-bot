@@ -8,7 +8,7 @@ on:
 
 concurrency:
   group: iwbot-trailing
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   trail:
@@ -24,18 +24,42 @@ jobs:
       - run: |
           python -m pip install --upgrade pip
           pip install pandas numpy requests
-      # Compute last Friday (if you don't already)
+    
+      - name: NY date (for daily lock)
+        id: nydate
+        shell: python
+        run: |
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+          import os
+          ny = ZoneInfo("America/New_York")
+          d  = datetime.now(ny).date()
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"today_ny={d}\n")
+      
+      - name: Daily once guard
+        id: dlock
+        uses: actions/cache@v4
+        with:
+          path: .trail-flag
+          key: trail-${{ steps.nydate.outputs.today_ny }}
+      
+      - name: Exit if already trailed today
+        if: steps.dlock.outputs.cache-hit == 'true'
+        run: echo "Already ran trailing for ${{ steps.nydate.outputs.today_ny }} — exiting." && exit 0
+      
+            # Compute last Friday (if you don't already)
       - name: Compute last Friday
         id: when
         shell: python
         run: |
-          from datetime import datetime, timedelta
-          import zoneinfo, os
-          tz = zoneinfo.ZoneInfo("Europe/Oslo")
-          d  = datetime.now(tz).date()
-          while d.weekday() != 4:   # 0=Mon..4=Fri
-              d -= timedelta(days=1)
-          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+           from datetime import datetime, timedelta
+           import zoneinfo, os
+           tz = zoneinfo.ZoneInfo("Europe/Oslo")
+           d  = datetime.now(tz).date()
+           while d.weekday() != 4:   # 0=Mon..4=Fri
+               d -= timedelta(days=1)
+           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"friday={d}\n")
 
       # Download the picklist artifact produced by friday-build.yml
