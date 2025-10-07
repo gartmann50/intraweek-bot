@@ -68,6 +68,34 @@ jobs:
             --rsi-min 68 --max-ext20 0.15 --top-per-week 40 \
             --until "${{ steps.when.outputs.friday }}" \
             --out backtests/picklist_highrsi_trend.csv
+    
+      # ensure requests is present (you already have pandas/numpy/pyyaml)
+      - run: |
+          python -m pip install --upgrade pip
+          pip install requests pandas numpy pyyaml
+        # (this may already exist in your job)
+      
+      # NEW — build dynamic universe (same thresholds as hi70)
+      - name: Build dynamic universe (Top-N by $ volume)
+        env:
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+        run: |
+          python tools/make_universe_topvol.py \
+            --topvol 1000 \
+            --cap-min 1000000000 \
+            --min-price 5 \
+            --min-dollar-vol 10000000 \
+            --out-dir backtests
+      
+      # NEW — filter picklist to that universe (no ranking changes)
+      - name: Filter picklist by dynamic universe
+        run: |
+          python tools/filter_picklist_by_symbols.py \
+            backtests/universe_topvol.txt \
+            backtests/picklist_highrsi_trend.csv \
+            backtests/picklist_highrsi_trend.csv
+
+      
       - name: Preview Top-K (save file)
         run: |
           set -e
