@@ -111,7 +111,7 @@ def main() -> None:
         if close <= 0 or vol <= 0: continue
         if close < cfg.min_price or dv < cfg.min_dollar_vol: continue
         mc = float(t.get("market_cap") or 0.0)
-        if cfg.cap_min and mc and mc < cfg.cap_min: continue  # only enforce if cap present
+        if cfg.cap_min and mc < cfg.cap_min: continue  # only enforce if cap present
         name = str(t.get("name") or "").strip()
         rows.append((sym, name, mc, close, vol, dv))
 
