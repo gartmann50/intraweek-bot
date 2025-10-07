@@ -263,6 +263,23 @@ jobs:
             echo "[probe] head of digest:"; sed -n '1,12p' "$TXT" || true
           fi
 
+      - name: Ensure hi70 files exist (create empty CSV header if missing)
+        shell: bash
+        run: |
+          set -e
+          mkdir -p backtests
+          if [[ ! -f backtests/hi70_thisweek.csv ]]; then
+            echo "symbol,name,market_cap,prior70h,week_high,week_close,gap_high_pct,gap_close_pct,first_break_day,bars" > backtests/hi70_thisweek.csv
+            echo "[fix] Created empty backtests/hi70_thisweek.csv with header."
+          fi
+          if [[ ! -f backtests/hi70_digest.txt ]]; then
+            echo "hi70 scan digest not produced this run." > backtests/hi70_digest.txt
+            echo "[fix] Created placeholder backtests/hi70_digest.txt."
+          fi
+          echo "[ls] backtests:"
+          ls -l backtests || true
+
+
       - name: Upload 70D-highs artifact
         uses: actions/upload-artifact@v4
         with:
