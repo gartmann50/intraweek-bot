@@ -34,7 +34,12 @@ jobs:
         with: { python-version: "3.11" }
       - run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy pyyaml requests
+          pip install --upgrade pandas numpy pyyaml requests matplotlib pillow
+        env:
+           MPLBACKEND: Agg     # safe default backend
+  
+
+          
       - name: Compute last Friday (Europe/Oslo)
         id: when
         shell: python
@@ -189,11 +194,13 @@ jobs:
       - name: Build mini-charts + HTML
         env:
           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+          MPLBACKEND: Agg
         run: |
           python tools/make_email_assets.py \
             --picklist backtests/picklist_highrsi_trend.csv \
             --hi70     backtests/hi70_thisweek.csv \
             --topk     ${{ inputs.topk != '' && inputs.topk || '6' }}
+
 
       - name: Email weekly summary (HTML + inline charts)
         env:
