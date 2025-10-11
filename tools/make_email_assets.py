@@ -3,6 +3,8 @@
 Builds candlestick mini-charts + HTML for the weekly email, with
 WEEKENDS REMOVED (compressed to trading-day index).
 
+Both sections (Momentum & Breakouts) use ~3 months of daily bars.
+
 Outputs in backtests/email_charts/:
   - PNG mini-charts (momentum & breakout) as candlesticks
   - email.html (embeds charts by cid:filename)
@@ -82,44 +84,36 @@ def name_of(symbol: str) -> str:
 def _tick_positions_and_labels(dts: list[dt.date], months: bool) -> tuple[list[int], list[str]]:
     """
     Build compact, human-friendly X tick positions/labels on a trading-day index.
-    - For 3-month (months=True): tick at first trading day of each month.
-    - For ~1-month (months=False): ~3-4 evenly spaced ticks with day+mon labels.
+    - For 3-month views (months=True): tick at first trading day of each month plus the last day.
     """
     n = len(dts)
     if n == 0:
         return [], []
 
-    if months:
-        # first index of each month
-        pos = []
-        lab = []
-        seen = set()
-        for i, d in enumerate(dts):
-            key = (d.year, d.month)
-            if key not in seen:
-                seen.add(key)
-                pos.append(i)
-                lab.append(d.strftime("%b"))  # Jan, Feb, ...
-        if pos[-1] != n - 1:
-            pos.append(n - 1); lab.append(dts[-1].strftime("%b"))
-        return pos, lab
-    else:
-        # ~1m view: 3–4 ticks (start, mid, end)
-        k = 4 if n >= 18 else 3
-        pos = sorted(set([0, n - 1] + [round(i) for i in np.linspace(0, n - 1, k)]))
-        lab = [dts[i].strftime("%d %b") for i in pos]  # e.g., "07 Oct"
-        return pos, lab
+    # month ticks (used for both sections now)
+    pos = []
+    lab = []
+    seen = set()
+    for i, d in enumerate(dts):
+        key = (d.year, d.month)
+        if key not in seen:
+            seen.add(key)
+            pos.append(i)
+            lab.append(d.strftime("%b"))  # Jan, Feb, ...
+    if pos[-1] != n - 1:
+        pos.append(n - 1); lab.append(dts[-1].strftime("%b"))
+    return pos, lab
 
 
 def mini_candles(
     dts: list[dt.date],
     o: list[float], h: list[float], l: list[float], c: list[float],
     out: p.Path,
-    months: bool = False
+    months: bool = True
 ):
     """
     Render a compact candlestick chart with axes using TRADING-DAY INDEX on X:
-      - X: integer index (no weekend gaps) with date string tick labels
+      - X: integer index (no weekend gaps) with month tick labels
       - Y: price ticks (min/mid/max)
     Size ~ 140x70 px.
     """
@@ -131,8 +125,7 @@ def mini_candles(
     ax = fig.add_axes([0.10, 0.18, 0.86, 0.74])
 
     x = np.arange(len(dts), dtype=float)
-    # bar width ~80% of spacing
-    width = 0.8
+    width = 0.8  # ~80% of spacing
 
     # Draw wicks + bodies
     for xi, oi, hi, lo, ci in zip(x, o, h, l, c):
@@ -150,8 +143,8 @@ def mini_candles(
     ax.set_xlim(-0.5, x.max() + 0.5)
     ax.grid(alpha=0.18, linewidth=0.4)
 
-    # X ticks: positions on index, labels from dates
-    pos, lab = _tick_positions_and_labels(dts, months=months)
+    # X ticks: positions on index, labels from dates (months)
+    pos, lab = _tick_positions_and_labels(dts, months=True)
     ax.set_xticks(pos)
     ax.set_xticklabels(lab, fontsize=7)
 
@@ -273,13 +266,13 @@ def main():
     except Exception:
         brk_pairs = []
 
-    # Build images
+    # Build images (3 months for BOTH sections)
     mom_rows: list[tuple[str, str, str]] = []
     for s in mom_syms:
         nm  = name_of(s)
         img = outdir / f"MOM_{s}.png"
-        dts, op, hi, lo, cl = ohlc(s, 22)  # ~1 month
-        mini_candles(dts, op, hi, lo, cl, img, months=False)
+        dts, op, hi, lo, cl = ohlc(s, 63)  # ~3 months
+        mini_candles(dts, op, hi, lo, cl, img, months=True)
         mom_rows.append((s, nm, img.name))
 
     brk_rows: list[tuple[str, str, str]] = []
@@ -296,8 +289,8 @@ def main():
         "<!doctype html><meta charset='utf-8'>",
         "<div style='font:14px/1.4 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial,sans-serif'>",
         "<h2 style='margin:0 0 8px'>IW Bot — Weekly Summary</h2>",
-        section_html("Momentum picks (1-month mini-charts)", mom_rows),
-        section_html("Breakouts — Top-10 (3-month mini-charts)", brk_rows),
+        section_html("Momentum picks (3-month mini-candles)", mom_rows),
+        section_html("Breakouts — Top-10 (3-month mini-candles)", brk_rows),
         "<p style='color:#888;font-size:12px;margin-top:12px'>"
         "Mini-charts: daily candlesticks; weekends compressed out."
         "</p></div>"
