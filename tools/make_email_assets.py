@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-IW Bot — Weekly HTML builder (Calm theme)
+IW Bot — Weekly HTML builder (Calm theme, charts only)
 - 3-month candlestick mini-charts, weekends compressed (trading-day index)
-- EMA(20) overlay
-- Price + 3-month % badge (green/red)
-- Two-column rounded "cards" with soft borders & metric chips
-- Beauty Panel: portfolio stats + per-ticker metrics (momentum & breakouts)
+- EMA(20) overlay + price/3m% badge
+- Two-column rounded "cards" with optional metric chips
+- NO top “Beauty panel” block (no tables, no portfolio stats)
 
 Outputs:
   backtests/email_charts/email.html
@@ -32,6 +31,9 @@ THEME = {
     "ema":         "#7F8AC9",   # soft periwinkle
     "grid":        "#ECE9F1",
 }
+
+# Toggle metric chips under each card (set False to hide)
+SHOW_CHIPS = True
 
 # ---------- plotting setup ----------
 import matplotlib
@@ -122,7 +124,7 @@ def read_breakouts(hi70_path: p.Path|None, topN: int = 10) -> list[tuple[str,str
         if sym: rows.append((sym,nm))
     return rows
 
-# ---------- metrics (Beauty) ----------
+# ---------- light metrics for chips (optional) ----------
 def atr14_pct(df: pd.DataFrame) -> float:
     c = df["close"].to_numpy(float)
     h = df["high"].to_numpy(float)
@@ -149,36 +151,6 @@ def snr63(df: pd.DataFrame) -> float:
     r = ret63_pct(df); s = sigma63_pct(df)
     if not np.isfinite(r) or not np.isfinite(s) or s==0: return float("nan")
     return float(r/s)
-
-def gap_vs_prior70(df: pd.DataFrame) -> float:
-    if len(df) < 80: return float("nan")
-    prior70 = float(np.max(df["high"].astype(float).to_numpy()[-71:-1]))
-    last = float(df["close"].iloc[-1])
-    if prior70 <= 0: return float("nan")
-    return float(100*(last/prior70-1))
-
-def momentum_portfolio_stats(dfs: dict[str,pd.DataFrame]) -> tuple[float,float,float]:
-    syms = list(dfs.keys())
-    rets, atrs = [], []
-    for s in syms:
-        d = dfs[s]
-        c = d["close"].astype(float).to_numpy()
-        if len(c) < 66: continue
-        r = np.diff(c)/c[:-1]
-        rets.append(r[-252:] if len(r)>=252 else r)
-        atrs.append(atr14_pct(d))
-    if len(rets) < 2:
-        return float("nan"), float("nan"), (np.nanmean(atrs) if atrs else float("nan"))
-    L = min(map(len, rets))
-    R = np.vstack([r[-L:] for r in rets])
-    corr = np.corrcoef(R)
-    mask = ~np.eye(corr.shape[0], dtype=bool)
-    avg_offdiag = float(np.mean(corr[mask])) if corr.size else float("nan")
-    cov = np.cov(R); n = cov.shape[0]; w = np.ones(n)/n
-    daily_vol = float(np.sqrt(w @ cov @ w))
-    vol5_pct = float(100*daily_vol*np.sqrt(5))
-    avg_atr = float(np.nanmean(atrs)) if atrs else float("nan")
-    return avg_offdiag, vol5_pct, avg_atr
 
 def fmt(x, prec=2, pct=False):
     if not np.isfinite(x): return "—"
@@ -262,7 +234,7 @@ def chip(label: str) -> str:
 
 def card(sym: str, name: str, img: str, met: dict|None) -> str:
     chips = ""
-    if met:
+    if SHOW_CHIPS and met:
         chips = "".join([
             chip(f"63d {fmt(met.get('ret63'),2,True)}"),
             chip(f"σ₆₃ {fmt(met.get('sig63'),2,True)}"),
@@ -277,7 +249,7 @@ def card(sym: str, name: str, img: str, met: dict|None) -> str:
         f"style='display:block;border:0;border-radius:10px' alt='{sym} mini-chart'>"
         f"<div style='margin-top:8px;font-weight:700;color:{THEME['text']}'>{sym}</div>"
         f"<div style='color:{THEME['muted']};font-size:13px;margin:2px 0 6px 0'>{name}</div>"
-        f"<div>{chips}</div>"
+        f"{('<div>'+chips+'</div>') if chips else ''}"
         f"</td></tr></table>"
     )
 
@@ -299,24 +271,6 @@ def section_cards(title: str, rows: list[tuple[str,str,str]], metrics: dict[str,
         html.append("</tr>")
     html.append("</table>")
     return "\n".join(html)
-
-def table_metrics(rows, breakout=False) -> str:
-    if not rows: return ""
-    cols = ["Symbol","Name","Price","63d","σ₆₃","SNR","ATR₁₄%"] + (["Gap70%"] if breakout else [])
-    th = lambda c: f"<th style='padding:6px 8px;text-align:left;font-weight:600;border-bottom:1px solid {THEME['card_border']};color:{THEME['text']}'>{c}</th>"
-    head = "".join(th(c) for c in cols)
-    body=[]
-    for r in rows:
-        cells = [
-            r["sym"], r["name"], fmt(r["price"],2,False),
-            fmt(r["ret63"],2,True), fmt(r["sig63"],2,True),
-            fmt(r["snr"],2,False), fmt(r["atrp"],2,True)
-        ]
-        if breakout: cells.append(fmt(r.get("gap70", float("nan")),2,True))
-        tds = "".join(f"<td style='padding:6px 8px;border-bottom:1px solid {THEME['card_border']};color:{THEME['text']}'>{c}</td>" for c in cells)
-        body.append(f"<tr>{tds}</tr>")
-    return (f"<table style='border-collapse:collapse;width:100%;margin:6px 0 10px 0'>"
-            f"<thead><tr>{head}</tr></thead><tbody>{''.join(body)}</tbody></table>")
 
 # ---------- main ----------
 def main():
@@ -361,48 +315,30 @@ def main():
         mini_candles(dts,op,hi,lo,cl,img)
         brk_rows.append((s,nm,img.name))
 
-    # metrics (for chips + tables)
-    mom_metrics_list=[]; mom_metrics_map={}
-    brk_metrics_list=[]; brk_metrics_map={}
-    mom_dfs={}
-    for s in mom_syms:
-        df = fetch_ohlc_full(s, 400)
-        if df is None: continue
-        mom_dfs[s]=df
-        met={"sym":s,"name":name_of(s),"price":df["close"].iloc[-1],
-             "ret63":ret63_pct(df),"sig63":sigma63_pct(df),"snr":snr63(df),"atrp":atr14_pct(df)}
-        mom_metrics_list.append(met); mom_metrics_map[s]=met
-    for s,nm in brk_pairs:
-        df = fetch_ohlc_full(s, 400)
-        if df is None: continue
-        met={"sym":s,"name":nm or name_of(s),"price":df["close"].iloc[-1],
-             "ret63":ret63_pct(df),"sig63":sigma63_pct(df),"snr":snr63(df),
-             "atrp":atr14_pct(df),"gap70":gap_vs_prior70(df)}
-        brk_metrics_list.append(met); brk_metrics_map[s]=met
+    # optional chip metrics (light compute)
+    mom_metrics_map={}; brk_metrics_map={}
+    if SHOW_CHIPS:
+        for s in mom_syms:
+            df = fetch_ohlc_full(s, 400)
+            if df is None: continue
+            mom_metrics_map[s] = {
+                "ret63":ret63_pct(df),"sig63":sigma63_pct(df),
+                "snr":snr63(df),"atrp":atr14_pct(df)
+            }
+        for s,_ in brk_pairs:
+            df = fetch_ohlc_full(s, 400)
+            if df is None: continue
+            brk_metrics_map[s] = {
+                "ret63":ret63_pct(df),"sig63":sigma63_pct(df),
+                "snr":snr63(df),"atrp":atr14_pct(df)
+            }
 
-    avg_corr, vol5, avg_atr = momentum_portfolio_stats(mom_dfs)
-
-    beauty_block = (
-        f"<div style='border:1px solid {THEME['card_border']};background:{THEME['card_bg']};"
-        f"border-radius:12px;padding:12px;margin:10px 0'>"
-        f"<div style='font-weight:700;margin-bottom:6px;color:{THEME['text']}'>Beauty panel — signal & risk</div>"
-        f"<div style='color:{THEME['muted']};font-size:13px'>"
-        f"Momentum basket: avg pairwise corr <b style='color:{THEME['text']}'>{fmt(avg_corr,2,False)}</b> · "
-        f"est EW vol (5d) <b style='color:{THEME['text']}'>{fmt(vol5,2,True)}</b> · "
-        f"avg ATR₁₄ <b style='color:{THEME['text']}'>{fmt(avg_atr,2,True)}</b>"
-        f"</div></div>"
-        f"<div style='margin-top:6px;color:{THEME['text']}'><b>Momentum picks — metrics</b></div>"
-        f"{table_metrics(mom_metrics_list, breakout=False)}"
-        f"<div style='margin-top:6px;color:{THEME['text']}'><b>Breakouts — Top-10 metrics</b></div>"
-        f"{table_metrics(brk_metrics_list, breakout=True)}"
-    )
-
+    # HTML (charts only; no beauty panel tables)
     html_parts = [
         "<!doctype html><meta charset='utf-8'>",
         f"<div style='background:{THEME['page_bg']};padding:12px;'>",
         f"<div style='max-width:820px;margin:0 auto;background:{THEME['page_bg']};'>",
         f"<h2 style='margin:0 0 8px;color:{THEME['text']}'>IW Bot — Weekly Summary</h2>",
-        beauty_block,
         section_cards("Momentum picks (3-month mini-candles)", mom_rows, mom_metrics_map),
         section_cards("Breakouts — Top-10 (3-month mini-candles)", brk_rows, brk_metrics_map),
         f"<p style='color:{THEME['muted']};font-size:12px;margin-top:12px'>"
@@ -413,7 +349,6 @@ def main():
 
     print(f"[email] momentum charts: {len(mom_rows)} @ ~{IMG_W}x{IMG_H}px")
     print(f"[email] breakout charts: {len(brk_rows)} @ ~{IMG_W}x{IMG_H}px")
-    print(f"[beauty] momentum metrics: {len(mom_metrics_list)} | breakout metrics: {len(brk_metrics_list)}")
 
 if __name__ == "__main__":
     main()
