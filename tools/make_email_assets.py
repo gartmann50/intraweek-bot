@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Builds small charts + HTML for the weekly email.
+Builds candlestick mini-charts + HTML for the weekly email.
 
 Outputs in backtests/email_charts/:
-  - PNG mini-charts (momentum & breakout)
+  - PNG mini-charts (momentum & breakout) as candlesticks
   - email.html (embeds charts by cid:filename)
 
 Inputs:
@@ -30,17 +30,21 @@ import matplotlib
 matplotlib.use("Agg")  # ensure headless backend
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+from matplotlib.patches import Rectangle
 
 API = "https://api.polygon.io"
 KEY = (os.getenv("POLYGON_API_KEY") or "").strip()
 
+UP_COLOR = "#2ca02c"
+DN_COLOR = "#d62728"
+
 
 # ----------------- helpers -----------------
 
-def bars(symbol: str, days: int) -> tuple[list[dt.date], list[float]]:
+def ohlc(symbol: str, days: int) -> tuple[list[dt.date], list[float], list[float], list[float], list[float]]:
     """
-    Fetch daily bars and return (dates, closes) for the last `days` trading days.
-    Uses a buffer to ensure we have enough data.
+    Fetch daily bars and return (dates, opens, highs, lows, closes)
+    for the last `days` trading days. Uses a buffer to ensure enough data.
     """
     end = dt.date.today()
     start = end - dt.timedelta(days=max(200, int(days * 4)))  # generous buffer
@@ -49,22 +53,21 @@ def bars(symbol: str, days: int) -> tuple[list[dt.date], list[float]]:
     try:
         j = requests.get(url, params=params, timeout=30).json()
         res = j.get("results") or []
-        dts = []
-        cls = []
+        dts, opn, high, low, cls = [], [], [], [], []
         for r in res:
-            c = r.get("c"); t = r.get("t")
-            if c is None or t is None:
+            o = r.get("o"); h = r.get("h"); l = r.get("l"); c = r.get("c"); t = r.get("t")
+            if None in (o, h, l, c, t):  # require full OHLC
                 continue
             try:
                 dts.append(dt.datetime.utcfromtimestamp(int(t) / 1000).date())
-                cls.append(float(c))
+                opn.append(float(o)); high.append(float(h)); low.append(float(l)); cls.append(float(c))
             except Exception:
                 continue
         if len(cls) > days:
-            dts, cls = dts[-days:], cls[-days:]
-        return dts, cls
+            dts, opn, high, low, cls = dts[-days:], opn[-days:], high[-days:], low[-days:], cls[-days:]
+        return dts, opn, high, low, cls
     except Exception:
-        return [], []
+        return [], [], [], [], []
 
 
 def name_of(symbol: str) -> str:
@@ -77,21 +80,47 @@ def name_of(symbol: str) -> str:
         return symbol
 
 
-def mini_chart(dts: list[dt.date], vals: list[float], out: p.Path, months: bool = False):
+def mini_candles(
+    dts: list[dt.date],
+    o: list[float], h: list[float], l: list[float], c: list[float],
+    out: p.Path,
+    months: bool = False
+):
     """
-    Render a compact chart with axes:
+    Render a compact candlestick chart with axes:
       - X: concise dates (month ticks if months=True)
       - Y: price ticks (min/mid/max)
     Size ~ half of the previous version (~140x70 px).
     """
-    if not dts or not vals:
+    if not dts or not c:
         return
 
     # ~156x78 px at dpi=130
     fig = plt.figure(figsize=(1.2, 0.6), dpi=130)
     ax = fig.add_axes([0.10, 0.18, 0.86, 0.74])
 
-    ax.plot(dts, vals, linewidth=1.2)
+    x = mdates.date2num(dts)
+    # bar width ~80% of the minimum spacing (falls back if single bar)
+    if len(x) > 1:
+        width = np.diff(np.unique(x)).min() * 0.8
+    else:
+        width = 0.6  # arbitrary when only one bar
+
+    # Draw wicks + bodies
+    for xi, oi, hi, lo, ci in zip(x, o, h, l, c):
+        color = UP_COLOR if ci >= oi else DN_COLOR
+        # wick
+        ax.vlines(xi, lo, hi, colors=color, linewidth=0.6, alpha=0.9)
+        # body
+        y0 = min(oi, ci)
+        bh = abs(ci - oi)
+        if bh < (max(1e-6, (hi - lo) * 0.02)):  # doji-ish: draw a thin line
+            ax.hlines((oi + ci) / 2.0, xi - width/2, xi + width/2, colors=color, linewidth=0.8, alpha=0.9)
+        else:
+            rect = Rectangle((xi - width/2, y0), width, bh, facecolor=color, edgecolor=color, linewidth=0.8, alpha=0.9)
+            ax.add_patch(rect)
+
+    ax.set_xlim(x.min() - width, x.max() + width)
     ax.grid(alpha=0.18, linewidth=0.4)
 
     # X axis formatting
@@ -104,7 +133,7 @@ def mini_chart(dts: list[dt.date], vals: list[float], out: p.Path, months: bool 
         ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(loc))
 
     # Y axis: min/mid/max
-    vmin, vmax = float(min(vals)), float(max(vals))
+    vmin = float(min(l)); vmax = float(max(h))
     if vmin == vmax:
         vmax = vmin * 1.01 + 0.01
     pad = (vmax - vmin) * 0.05
@@ -140,10 +169,7 @@ def read_topk_from_picklist(picklist: p.Path, topk: int) -> list[str]:
 
 
 def find_hi70_csv(default: p.Path = p.Path("backtests/hi70_thisweek.csv")) -> p.Path | None:
-    """
-    Locate hi70_thisweek.csv if present anywhere under backtests/.
-    Prefer the newest by modification time.
-    """
+    """Locate hi70_thisweek.csv anywhere under backtests/ (newest first)."""
     if default.exists():
         return default
     root = p.Path("backtests")
@@ -157,10 +183,7 @@ def find_hi70_csv(default: p.Path = p.Path("backtests/hi70_thisweek.csv")) -> p.
 
 
 def read_breakouts(hi70_path: p.Path | None, topN: int = 10) -> list[tuple[str, str]]:
-    """
-    Read breakouts CSV: returns list of (symbol, name).
-    If name is empty/missing, the caller will populate via Polygon.
-    """
+    """Read breakouts CSV: returns list of (symbol, name)."""
     if not hi70_path or not hi70_path.exists():
         return []
     df = pd.read_csv(hi70_path)
@@ -234,8 +257,8 @@ def main():
     for s in mom_syms:
         nm  = name_of(s)
         img = outdir / f"MOM_{s}.png"
-        dts, cls = bars(s, 22)  # ~1 month
-        mini_chart(dts, cls, img, months=False)
+        dts, op, hi, lo, cl = ohlc(s, 22)  # ~1 month
+        mini_candles(dts, op, hi, lo, cl, img, months=False)
         mom_rows.append((s, nm, img.name))
 
     brk_rows: list[tuple[str, str, str]] = []
@@ -243,8 +266,8 @@ def main():
         if not nm:
             nm = name_of(s)
         img = outdir / f"BO_{s}.png"
-        dts, cls = bars(s, 63)  # ~3 months
-        mini_chart(dts, cls, img, months=True)
+        dts, op, hi, lo, cl = ohlc(s, 63)  # ~3 months
+        mini_candles(dts, op, hi, lo, cl, img, months=True)
         brk_rows.append((s, nm, img.name))
 
     # HTML
@@ -255,7 +278,7 @@ def main():
         section_html("Momentum picks (1-month mini-charts)", mom_rows),
         section_html("Breakouts — Top-10 (3-month mini-charts)", brk_rows),
         "<p style='color:#888;font-size:12px;margin-top:12px'>"
-        "Mini-charts: daily closes; for context, consult your platform."
+        "Mini-charts: daily candlesticks; for context, consult your platform."
         "</p></div>"
     ]
     (outdir / "email.html").write_text("\n".join(html_parts), encoding="utf-8")
