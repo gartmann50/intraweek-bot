@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Builds the weekly HTML (with Beauty Panel) + candlestick mini-charts.
+Builds the weekly HTML (Beauty Panel + prettier cards) + candlestick mini-charts.
 
-Features
-- Momentum Top-K and Breakouts Top-10, 3-month daily candlesticks
-- Weekends removed (trading-day index)
-- Month ticks on X, price ticks on Y
-- Doubled chart size (~280x140 px)
-- Beauty Panel with per-ticker metrics and portfolio stats
+What’s new (prettier):
+- 3-month candlesticks (weekends compressed), now with EMA(20) overlay
+- Price + 3-month % label on each chart (green/red badge)
+- 2-column card layout with rounded corners
+- Metric chips (63d%, σ63%, SNR, ATR14%) under each symbol
+- Beauty Panel retained (portfolio stats + per-ticker tables)
 
 Outputs
   backtests/email_charts/
@@ -35,7 +35,7 @@ import numpy as np
 
 # ---- plotting setup (headless) ----
 import matplotlib
-matplotlib.use("Agg")  # ensure headless backend
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
@@ -44,26 +44,24 @@ KEY = (os.getenv("POLYGON_API_KEY") or "").strip()
 
 UP_COLOR = "#2ca02c"
 DN_COLOR = "#d62728"
+EMA_COLOR = "#1f77b4"   # subtle blue line
 
-# ===== Size & style (easy to tweak) =====
-FIG_W_IN = 2.4     # inches  (2x previous)
-FIG_H_IN = 1.2     # inches
-DPI      = 130     # -> ~312x156 canvas pre-trim
-IMG_W    = 280     # HTML width (px)
-IMG_H    = 140     # HTML height (px)
+# ===== Size & style =====
+FIG_W_IN = 2.4
+FIG_H_IN = 1.2
+DPI      = 130
+IMG_W    = 280
+IMG_H    = 140
 TICK_FONTSZ = 9
-CELL_W   = 320     # table cell width to fit larger image
+CARD_PAD   = "10px"
+CELL_W     = 360  # width to fit chart + padding nicely
 
 
 # ----------------- data fetch -----------------
 
 def ohlc(symbol: str, days: int) -> tuple[list[dt.date], list[float], list[float], list[float], list[float]]:
-    """
-    Fetch daily bars and return (dates, opens, highs, lows, closes)
-    for the last `days` TRADING days. Uses a buffer to ensure enough data.
-    """
     end = dt.date.today()
-    start = end - dt.timedelta(days=max(200, int(days * 4)))  # generous buffer
+    start = end - dt.timedelta(days=max(200, int(days * 4)))
     url = f"{API}/v2/aggs/ticker/{symbol}/range/1/day/{start}/{end}"
     params = {"adjusted": "true", "sort": "asc", "limit": "50000", "apiKey": KEY}
     try:
@@ -84,7 +82,6 @@ def ohlc(symbol: str, days: int) -> tuple[list[dt.date], list[float], list[float
 
 
 def fetch_ohlc_full(symbol: str, lookback_days: int = 400) -> pd.DataFrame | None:
-    """For metrics: full OHLCV DataFrame over ~400 calendar days."""
     end = dt.date.today()
     start = end - dt.timedelta(days=lookback_days)
     url = f"{API}/v2/aggs/ticker/{symbol}/range/1/day/{start}/{end}"
@@ -100,7 +97,6 @@ def fetch_ohlc_full(symbol: str, lookback_days: int = 400) -> pd.DataFrame | Non
 
 
 def name_of(symbol: str) -> str:
-    """Fetch company name from Polygon. Fallback to symbol on error."""
     try:
         j = requests.get(f"{API}/v3/reference/tickers/{symbol}",
                          params={"apiKey": KEY}, timeout=20).json()
@@ -112,9 +108,6 @@ def name_of(symbol: str) -> str:
 # ----------------- plotting (compressed trading axis) -----------------
 
 def _tick_positions_and_labels(dts: list[dt.date]) -> tuple[list[int], list[str]]:
-    """
-    Month-based ticks on trading-day index: first trading day of each month + last day.
-    """
     n = len(dts)
     if n == 0:
         return [], []
@@ -124,10 +117,21 @@ def _tick_positions_and_labels(dts: list[dt.date]) -> tuple[list[int], list[str]
         if key not in seen:
             seen.add(key)
             pos.append(i)
-            lab.append(d.strftime("%b"))  # Jan, Feb, ...
+            lab.append(d.strftime("%b"))
     if pos[-1] != n - 1:
         pos.append(n - 1); lab.append(dts[-1].strftime("%b"))
     return pos, lab
+
+
+def _ema(arr: np.ndarray, win: int = 20) -> np.ndarray:
+    if len(arr) == 0:
+        return arr
+    alpha = 2.0 / (win + 1.0)
+    out = np.empty_like(arr, dtype=float)
+    out[0] = arr[0]
+    for i in range(1, len(arr)):
+        out[i] = alpha * arr[i] + (1 - alpha) * out[i-1]
+    return out
 
 
 def mini_candles(
@@ -135,11 +139,6 @@ def mini_candles(
     o: list[float], h: list[float], l: list[float], c: list[float],
     out: p.Path
 ):
-    """
-    Render a compact candlestick chart with axes using TRADING-DAY INDEX on X:
-      - X: integer index (no weekend gaps) with month tick labels
-      - Y: price ticks (min/mid/max)
-    """
     if not dts or not c:
         return
 
@@ -147,29 +146,34 @@ def mini_candles(
     ax = fig.add_axes([0.10, 0.18, 0.86, 0.74])
 
     x = np.arange(len(dts), dtype=float)
-    width = 0.8  # ~80% of spacing
+    width = 0.8
 
     # Draw wicks + bodies
     for xi, oi, hi, lo, ci in zip(x, o, h, l, c):
         color = UP_COLOR if ci >= oi else DN_COLOR
         ax.vlines(xi, lo, hi, colors=color, linewidth=0.8, alpha=0.95)
         y0 = min(oi, ci); bh = abs(ci - oi)
-        if bh < max(1e-6, (hi - lo) * 0.02):  # doji-ish
+        if bh < max(1e-6, (hi - lo) * 0.02):
             ax.hlines((oi + ci) / 2.0, xi - width/2, xi + width/2, colors=color, linewidth=1.0, alpha=0.95)
         else:
             rect = Rectangle((xi - width/2, y0), width, bh,
                              facecolor=color, edgecolor=color, linewidth=0.9, alpha=0.95)
             ax.add_patch(rect)
 
+    # EMA(20) overlay (on closes)
+    c_arr = np.asarray(c, dtype=float)
+    ema20 = _ema(c_arr, 20)
+    ax.plot(x, ema20, linewidth=1.0, alpha=0.9, color=EMA_COLOR)
+
     ax.set_xlim(-0.5, x.max() + 0.5)
     ax.grid(alpha=0.20, linewidth=0.5)
 
-    # X ticks: positions on index, labels from dates (months)
+    # X ticks
     pos, lab = _tick_positions_and_labels(dts)
     ax.set_xticks(pos)
     ax.set_xticklabels(lab, fontsize=TICK_FONTSZ)
 
-    # Y axis: min/mid/max
+    # Y axis
     vmin = float(min(l)); vmax = float(max(h))
     if vmin == vmax:
         vmax = vmin * 1.01 + 0.01
@@ -181,6 +185,21 @@ def mini_candles(
     for s in ax.spines.values():
         s.set_visible(False)
 
+    # Corner badge: price + window % change
+    try:
+        pct = 100.0 * (c_arr[-1] / c_arr[0] - 1.0)
+        lbl = f"{c_arr[-1]:.2f}  ({pct:+.1f}%)"
+        badge_color = UP_COLOR if pct >= 0 else DN_COLOR
+        ax.text(
+            0.98, 0.02, lbl,
+            transform=ax.transAxes,
+            ha="right", va="bottom",
+            fontsize=8, color=badge_color,
+            bbox=dict(boxstyle="round,pad=0.25", facecolor="#ffffff", edgecolor="#ddd", linewidth=0.6, alpha=0.9)
+        )
+    except Exception:
+        pass
+
     fig.savefig(out, bbox_inches="tight", pad_inches=0.05)
     plt.close(fig)
 
@@ -188,7 +207,6 @@ def mini_candles(
 # ----------------- CSV helpers -----------------
 
 def read_topk_from_picklist(picklist: p.Path, topk: int) -> list[str]:
-    """From picklist CSV, take the latest week and return Top-K symbols."""
     df = pd.read_csv(picklist)
     wk = "week_start" if "week_start" in df.columns else ("week" if "week" in df.columns else None)
     if wk:
@@ -204,7 +222,6 @@ def read_topk_from_picklist(picklist: p.Path, topk: int) -> list[str]:
 
 
 def find_hi70_csv(default: p.Path = p.Path("backtests/hi70_thisweek.csv")) -> p.Path | None:
-    """Locate hi70_thisweek.csv anywhere under backtests/ (newest first)."""
     if default.exists():
         return default
     root = p.Path("backtests")
@@ -218,7 +235,6 @@ def find_hi70_csv(default: p.Path = p.Path("backtests/hi70_thisweek.csv")) -> p.
 
 
 def read_breakouts(hi70_path: p.Path | None, topN: int = 10) -> list[tuple[str, str]]:
-    """Read breakouts CSV: returns list of (symbol, name)."""
     if not hi70_path or not hi70_path.exists():
         return []
     df = pd.read_csv(hi70_path)
@@ -231,7 +247,7 @@ def read_breakouts(hi70_path: p.Path | None, topN: int = 10) -> list[tuple[str, 
     return rows
 
 
-# ----------------- Beauty Panel (metrics) -----------------
+# ----------------- Beauty metrics -----------------
 
 def atr14_pct(df: pd.DataFrame) -> float:
     c = df["close"].to_numpy(float)
@@ -263,7 +279,6 @@ def snr63(df: pd.DataFrame) -> float:
     return float(r / s)
 
 def gap_vs_prior70(df: pd.DataFrame) -> float:
-    # distance of last close vs max high of prior 70 trading days (exclude last bar)
     if len(df) < 80: return float("nan")
     prior70 = float(np.max(df["high"].astype(float).to_numpy()[-71:-1]))
     last = float(df["close"].iloc[-1])
@@ -271,7 +286,6 @@ def gap_vs_prior70(df: pd.DataFrame) -> float:
     return float(100 * (last / prior70 - 1))
 
 def momentum_portfolio_stats(dfs: dict[str, pd.DataFrame]) -> tuple[float, float, float]:
-    # returns avg pairwise corr, est EW vol (5d %), avg ATR%
     syms = list(dfs.keys())
     rets, atrs = [], []
     for s in syms:
@@ -303,26 +317,68 @@ def fmt(x, prec=2, pct=False):
 
 # ----------------- HTML helpers -----------------
 
-def section_html(title: str, rows: list[tuple[str, str, str]]) -> str:
-    """HTML table for a set of rows (sym, name, img-filename)."""
+def chip(label: str) -> str:
+    return (f"<span style='display:inline-block;background:#f3f5f7;border:1px solid #e7eaee;"
+            f"border-radius:999px;padding:2px 8px;margin:0 6px 0 0;font-size:12px;color:#333'>{label}</span>")
+
+def card(sym: str, name: str, img: str, met: dict | None) -> str:
+    chips = ""
+    if met:
+        chips = "".join([
+            chip(f"63d {fmt(met.get('ret63'),2,True)}"),
+            chip(f"σ₆₃ {fmt(met.get('sig63'),2,True)}"),
+            chip(f"SNR {fmt(met.get('snr'),2,False)}"),
+            chip(f"ATR₁₄ {fmt(met.get('atrp'),2,True)}"),
+        ])
+    return (
+        f"<table role='presentation' cellspacing='0' cellpadding='0' style='width:100%;"
+        f"border:1px solid #e9ecef;border-radius:12px;overflow:hidden'>"
+        f"<tr><td style='padding:{CARD_PAD}'>"
+        f"<img src='cid:{img}' width='{IMG_W}' height='{IMG_H}' "
+        f"style='display:block;border:0;border-radius:8px' alt='{sym} mini-chart'>"
+        f"<div style='margin-top:8px;font-weight:700'>{sym}</div>"
+        f"<div style='color:#666;font-size:13px;margin:2px 0 6px 0'>{name}</div>"
+        f"<div>{chips}</div>"
+        f"</td></tr></table>"
+    )
+
+def section_cards(title: str, rows: list[tuple[str, str, str]], metrics: dict[str,dict]) -> str:
     if not rows:
         return ""
-    lines = [
-        f"<h3 style='margin:12px 0'>{title}</h3>",
-        "<table style='border-collapse:collapse;width:100%'>"
-    ]
-    for s, nm, img in rows:
-        lines.append(
-            "<tr>"
-            f"<td style='padding:6px 8px;width:{CELL_W}px'>"
-            f"<img src='cid:{img}' width='{IMG_W}' height='{IMG_H}' style='display:block;border:0'></td>"
-            f"<td style='padding:6px 8px;vertical-align:middle'>"
-            f"<div style='font-weight:600'>{s}</div>"
-            f"<div style='color:#666;font-size:14px'>{nm}</div>"
-            "</td></tr>"
-        )
-    lines.append("</table>")
-    return "\n".join(lines)
+    # two columns (email-safe via table layout)
+    html = [f"<h3 style='margin:12px 0'>{title}</h3>",
+            "<table role='presentation' cellspacing='0' cellpadding='0' style='width:100%'>"]
+    for i in range(0, len(rows), 2):
+        html.append("<tr>")
+        for j in range(2):
+            if i+j < len(rows):
+                s, nm, img = rows[i+j]
+                met = metrics.get(s, {})
+                html.append(
+                    f"<td valign='top' style='padding:6px;width:{CELL_W}px'>{card(s, nm, img, met)}</td>"
+                )
+            else:
+                html.append("<td></td>")
+        html.append("</tr>")
+    html.append("</table>")
+    return "\n".join(html)
+
+def table_metrics(rows, breakout=False) -> str:
+    if not rows: return ""
+    cols = ["Symbol","Name","Price","63d","σ₆₃","SNR","ATR₁₄%"] + (["Gap70%"] if breakout else [])
+    head = "".join(f"<th style='padding:6px 8px;text-align:left;font-weight:600;border-bottom:1px solid #eee'>{c}</th>" for c in cols)
+    body = []
+    for r in rows:
+        cells = [
+            r["sym"], r["name"], fmt(r["price"],2,False),
+            fmt(r["ret63"],2,True), fmt(r["sig63"],2,True),
+            fmt(r["snr"],2,False), fmt(r["atrp"],2,True)
+        ]
+        if breakout: cells.append(fmt(r.get("gap70", float("nan")),2,True))
+        tds = "".join(f"<td style='padding:6px 8px;border-bottom:1px solid #f6f6f6'>{c}</td>" for c in cells)
+        body.append(f"<tr>{tds}</tr>")
+    return ("<table style='border-collapse:collapse;width:100%;margin:6px 0 10px 0'>"
+            f"<thead><tr>{head}</tr></thead><tbody>{''.join(body)}</tbody></table>")
 
 
 # ----------------- main -----------------
@@ -353,18 +409,18 @@ def main():
         hi70_path = find_hi70_csv(hi70_path)
     print(f"[email] hi70 CSV: {hi70_path if hi70_path else '(not found)'}")
 
-    # Breakouts (symbol, name) pairs
+    # Breakouts (symbol, name)
     try:
         brk_pairs = read_breakouts(hi70_path, 10)
     except Exception:
         brk_pairs = []
 
-    # ---------- Build images (3 months for BOTH sections) ----------
+    # ---------- Build images ----------
     mom_rows: list[tuple[str, str, str]] = []
     for s in mom_syms:
         nm  = name_of(s)
         img = outdir / f"MOM_{s}.png"
-        dts, op, hi, lo, cl = ohlc(s, 63)  # ~3 months
+        dts, op, hi, lo, cl = ohlc(s, 63)
         mini_candles(dts, op, hi, lo, cl, img)
         mom_rows.append((s, nm, img.name))
 
@@ -373,29 +429,31 @@ def main():
         if not nm:
             nm = name_of(s)
         img = outdir / f"BO_{s}.png"
-        dts, op, hi, lo, cl = ohlc(s, 63)  # ~3 months
+        dts, op, hi, lo, cl = ohlc(s, 63)
         mini_candles(dts, op, hi, lo, cl, img)
         brk_rows.append((s, nm, img.name))
 
-    # ---------- Beauty Panel ----------
-    mom_metrics, brk_metrics = [], []
-    mom_dfs: dict[str, pd.DataFrame] = {}
+    # ---------- Beauty metrics (and per-card chips) ----------
+    mom_metrics_list, brk_metrics_list = [], []
+    mom_metrics_map: dict[str,dict] = {}
     for s in mom_syms:
         df = fetch_ohlc_full(s, 400)
         if df is None: continue
-        mom_dfs[s] = df
-        mom_metrics.append({
+        met = {
             "sym": s, "name": name_of(s),
             "price": df["close"].iloc[-1],
             "ret63": ret63_pct(df),
             "sig63": sigma63_pct(df),
             "snr":   snr63(df),
             "atrp":  atr14_pct(df)
-        })
+        }
+        mom_metrics_list.append(met)
+        mom_metrics_map[s] = met
+    brk_metrics_map: dict[str,dict] = {}
     for s, nm in brk_pairs:
         df = fetch_ohlc_full(s, 400)
         if df is None: continue
-        brk_metrics.append({
+        met = {
             "sym": s, "name": nm or name_of(s),
             "price": df["close"].iloc[-1],
             "ret63": ret63_pct(df),
@@ -403,35 +461,16 @@ def main():
             "snr":   snr63(df),
             "atrp":  atr14_pct(df),
             "gap70": gap_vs_prior70(df)
-        })
+        }
+        brk_metrics_list.append(met)
+        brk_metrics_map[s] = met
 
-    avg_corr, vol5, avg_atr = momentum_portfolio_stats(mom_dfs)
-
-    def table(rows, breakout=False):
-        if not rows: return ""
-        cols = ["Symbol","Name","Price","63d","σ₆₃","SNR","ATR₁₄%"] + (["Gap70%"] if breakout else [])
-        head = "".join(f"<th style='padding:6px 8px;text-align:left;font-weight:600;border-bottom:1px solid #eee'>{c}</th>" for c in cols)
-        body = []
-        for r in rows:
-            cells = [
-                r["sym"],
-                r["name"],
-                fmt(r["price"],2,False),
-                fmt(r["ret63"],2,True),
-                fmt(r["sig63"],2,True),
-                fmt(r["snr"],2,False),
-                fmt(r["atrp"],2,True)
-            ]
-            if breakout: cells.append(fmt(r.get("gap70", float("nan")),2,True))
-            tds = "".join(f"<td style='padding:6px 8px;border-bottom:1px solid #f6f6f6'>{c}</td>" for c in cells)
-            body.append(f"<tr>{tds}</tr>")
-        return (
-            "<table style='border-collapse:collapse;width:100%;margin:6px 0 10px 0'>"
-            f"<thead><tr>{head}</tr></thead><tbody>{''.join(body)}</tbody></table>"
-        )
+    avg_corr, vol5, avg_atr = momentum_portfolio_stats(
+        {s: fetch_ohlc_full(s, 400) for s in mom_syms if fetch_ohlc_full(s, 400) is not None}
+    )
 
     beauty_block = (
-        "<div style='border:1px solid #e9ecef;border-radius:10px;padding:12px;margin:10px 0'>"
+        "<div style='border:1px solid #e9ecef;border-radius:12px;padding:12px;margin:10px 0'>"
         "<div style='font-weight:700;margin-bottom:6px'>Beauty panel — signal & risk</div>"
         "<div style='color:#444;font-size:13px'>"
         f"Momentum basket: avg pairwise corr <b>{fmt(avg_corr,2,False)}</b> · "
@@ -440,9 +479,9 @@ def main():
         "</div>"
         "</div>"
         "<div style='margin-top:6px'><b>Momentum picks — metrics</b></div>"
-        f"{table(mom_metrics, breakout=False)}"
+        f"{table_metrics(mom_metrics_list, breakout=False)}"
         "<div style='margin-top:6px'><b>Breakouts — Top-10 metrics</b></div>"
-        f"{table(brk_metrics, breakout=True)}"
+        f"{table_metrics(brk_metrics_list, breakout=True)}"
     )
 
     # ---------- HTML ----------
@@ -451,18 +490,18 @@ def main():
         "<div style='font:14px/1.5 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial,sans-serif'>",
         "<h2 style='margin:0 0 8px'>IW Bot — Weekly Summary</h2>",
         beauty_block,
-        section_html("Momentum picks (3-month mini-candles)", mom_rows),
-        section_html("Breakouts — Top-10 (3-month mini-candles)", brk_rows),
+        section_cards("Momentum picks (3-month mini-candles)", mom_rows, mom_metrics_map),
+        section_cards("Breakouts — Top-10 (3-month mini-candles)", brk_rows, brk_metrics_map),
         "<p style='color:#888;font-size:12px;margin-top:12px'>"
-        "Mini-charts: daily candlesticks; weekends compressed out."
+        "Mini-charts: daily candlesticks with EMA(20); weekends compressed out."
         "</p></div>"
     ]
-    (outdir / "email.html").write_text("\n".join(html_parts), encoding="utf-8")
+    out = p.Path(args.outdir) / "email.html"
+    out.write_text("\n".join(html_parts), encoding="utf-8")
 
-    # Console hints
     print(f"[email] momentum charts: {len(mom_rows)} @ ~{IMG_W}x{IMG_H}px")
     print(f"[email] breakout charts: {len(brk_rows)} @ ~{IMG_W}x{IMG_H}px")
-    print(f"[beauty] momentum metrics: {len(mom_metrics)} | breakout metrics: {len(brk_metrics)}")
+    print(f"[beauty] momentum metrics: {len(mom_metrics_list)} | breakout metrics: {len(brk_metrics_list)}")
     if hi70_path and hi70_path.exists():
         print(f"[email] used hi70: {hi70_path}")
     else:
