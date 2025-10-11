@@ -1,23 +1,26 @@
 #!/usr/bin/env python3
 """
-Builds candlestick mini-charts + HTML for the weekly email, with
-WEEKENDS REMOVED (compressed to trading-day index).
+Builds the weekly HTML (with Beauty Panel) + candlestick mini-charts.
 
-Both sections (Momentum & Breakouts) use ~3 months of daily bars.
+Features
+- Momentum Top-K and Breakouts Top-10, 3-month daily candlesticks
+- Weekends removed (trading-day index)
+- Month ticks on X, price ticks on Y
+- Doubled chart size (~280x140 px)
+- Beauty Panel with per-ticker metrics and portfolio stats
 
-Chart size is doubled vs prior version (~280x140 px each).
+Outputs
+  backtests/email_charts/
+    - email.html
+    - PNGs: MOM_<sym>.png, BO_<sym>.png
 
-Outputs in backtests/email_charts/:
-  - PNG mini-charts (momentum & breakout) as candlesticks
-  - email.html (embeds charts by cid:filename)
-
-Inputs:
+Inputs
   --picklist backtests/picklist_highrsi_trend.csv
   --hi70     backtests/hi70_thisweek.csv  (optional; auto-discover if missing)
   --topk     6
   --outdir   backtests/email_charts
 
-Env:
+Env
   POLYGON_API_KEY   (required)
 """
 
@@ -43,13 +46,13 @@ UP_COLOR = "#2ca02c"
 DN_COLOR = "#d62728"
 
 # ===== Size & style (easy to tweak) =====
-FIG_W_IN = 2.4     # inches  (was 1.2)
-FIG_H_IN = 1.2     # inches  (was 0.6)
-DPI      = 130     # => ~312x156 canvas before bbox trim
-IMG_W    = 280     # HTML width attribute (px) ~2x previous 140
-IMG_H    = 140     # HTML height attribute (px)
-TICK_FONTSZ = 9    # axis tick font size (was 7)
-CELL_W   = 320     # table cell width to fit the larger image
+FIG_W_IN = 2.4     # inches  (2x previous)
+FIG_H_IN = 1.2     # inches
+DPI      = 130     # -> ~312x156 canvas pre-trim
+IMG_W    = 280     # HTML width (px)
+IMG_H    = 140     # HTML height (px)
+TICK_FONTSZ = 9
+CELL_W   = 320     # table cell width to fit larger image
 
 
 # ----------------- data fetch -----------------
@@ -78,6 +81,22 @@ def ohlc(symbol: str, days: int) -> tuple[list[dt.date], list[float], list[float
         return dts, opn, high, low, cls
     except Exception:
         return [], [], [], [], []
+
+
+def fetch_ohlc_full(symbol: str, lookback_days: int = 400) -> pd.DataFrame | None:
+    """For metrics: full OHLCV DataFrame over ~400 calendar days."""
+    end = dt.date.today()
+    start = end - dt.timedelta(days=lookback_days)
+    url = f"{API}/v2/aggs/ticker/{symbol}/range/1/day/{start}/{end}"
+    j = requests.get(url, params={"adjusted":"true","sort":"asc","limit":"50000","apiKey":KEY}, timeout=30).json()
+    rows = j.get("results") or []
+    if not rows:
+        return None
+    df = pd.DataFrame(rows)[["t","o","h","l","c","v"]].rename(
+        columns={"t":"ts","o":"open","h":"high","l":"low","c":"close","v":"vol"}
+    )
+    df["date"] = pd.to_datetime(df["ts"], unit="ms").dt.date
+    return df
 
 
 def name_of(symbol: str) -> str:
@@ -133,7 +152,7 @@ def mini_candles(
     # Draw wicks + bodies
     for xi, oi, hi, lo, ci in zip(x, o, h, l, c):
         color = UP_COLOR if ci >= oi else DN_COLOR
-        ax.vlines(xi, lo, hi, colors=color, linewidth=0.8, alpha=0.95)  # thicker for bigger chart
+        ax.vlines(xi, lo, hi, colors=color, linewidth=0.8, alpha=0.95)
         y0 = min(oi, ci); bh = abs(ci - oi)
         if bh < max(1e-6, (hi - lo) * 0.02):  # doji-ish
             ax.hlines((oi + ci) / 2.0, xi - width/2, xi + width/2, colors=color, linewidth=1.0, alpha=0.95)
@@ -212,6 +231,78 @@ def read_breakouts(hi70_path: p.Path | None, topN: int = 10) -> list[tuple[str, 
     return rows
 
 
+# ----------------- Beauty Panel (metrics) -----------------
+
+def atr14_pct(df: pd.DataFrame) -> float:
+    c = df["close"].to_numpy(float)
+    h = df["high"].to_numpy(float)
+    l = df["low"].to_numpy(float)
+    prev_c = np.r_[np.nan, c[:-1]]
+    tr = np.maximum(h - l, np.maximum(np.abs(h - prev_c), np.abs(l - prev_c)))
+    atr = pd.Series(tr).rolling(14, min_periods=14).mean().iloc[-1]
+    if not np.isfinite(atr):
+        return float("nan")
+    return float(100 * atr / c[-1])
+
+def sigma63_pct(df: pd.DataFrame) -> float:
+    c = df["close"].astype(float).to_numpy()
+    if len(c) < 65: return float("nan")
+    r = np.diff(c) / c[:-1]
+    s = np.std(r[-252:]) if len(r) >= 252 else np.std(r)
+    return float(100 * s * np.sqrt(63))
+
+def ret63_pct(df: pd.DataFrame) -> float:
+    c = df["close"].astype(float).to_numpy()
+    if len(c) < 64: return float("nan")
+    return float(100 * (c[-1] / c[-63] - 1))
+
+def snr63(df: pd.DataFrame) -> float:
+    r = ret63_pct(df); s = sigma63_pct(df)
+    if not np.isfinite(r) or not np.isfinite(s) or s == 0:
+        return float("nan")
+    return float(r / s)
+
+def gap_vs_prior70(df: pd.DataFrame) -> float:
+    # distance of last close vs max high of prior 70 trading days (exclude last bar)
+    if len(df) < 80: return float("nan")
+    prior70 = float(np.max(df["high"].astype(float).to_numpy()[-71:-1]))
+    last = float(df["close"].iloc[-1])
+    if prior70 <= 0: return float("nan")
+    return float(100 * (last / prior70 - 1))
+
+def momentum_portfolio_stats(dfs: dict[str, pd.DataFrame]) -> tuple[float, float, float]:
+    # returns avg pairwise corr, est EW vol (5d %), avg ATR%
+    syms = list(dfs.keys())
+    rets, atrs = [], []
+    for s in syms:
+        d = dfs[s]
+        c = d["close"].astype(float).to_numpy()
+        if len(c) < 66: continue
+        r = np.diff(c) / c[:-1]
+        rets.append(r[-252:] if len(r) >= 252 else r)
+        atrs.append(atr14_pct(d))
+    if len(rets) < 2:
+        return float("nan"), float("nan"), (np.nanmean(atrs) if atrs else float("nan"))
+    L = min(map(len, rets))
+    R = np.vstack([r[-L:] for r in rets])
+    corr = np.corrcoef(R)
+    mask = ~np.eye(corr.shape[0], dtype=bool)
+    avg_offdiag = float(np.mean(corr[mask])) if corr.size else float("nan")
+    cov = np.cov(R)
+    n = cov.shape[0]
+    w = np.ones(n) / n
+    daily_vol = float(np.sqrt(w @ cov @ w))
+    vol5_pct = float(100 * daily_vol * np.sqrt(5))
+    avg_atr = float(np.nanmean(atrs)) if atrs else float("nan")
+    return avg_offdiag, vol5_pct, avg_atr
+
+def fmt(x, prec=2, pct=False):
+    if not np.isfinite(x): return "—"
+    return f"{x:.{prec}f}{'%' if pct else ''}"
+
+
+# ----------------- HTML helpers -----------------
+
 def section_html(title: str, rows: list[tuple[str, str, str]]) -> str:
     """HTML table for a set of rows (sym, name, img-filename)."""
     if not rows:
@@ -262,13 +353,13 @@ def main():
         hi70_path = find_hi70_csv(hi70_path)
     print(f"[email] hi70 CSV: {hi70_path if hi70_path else '(not found)'}")
 
-    # Breakouts (symbol, name)
+    # Breakouts (symbol, name) pairs
     try:
         brk_pairs = read_breakouts(hi70_path, 10)
     except Exception:
         brk_pairs = []
 
-    # Build images (3 months for BOTH sections)
+    # ---------- Build images (3 months for BOTH sections) ----------
     mom_rows: list[tuple[str, str, str]] = []
     for s in mom_syms:
         nm  = name_of(s)
@@ -286,11 +377,80 @@ def main():
         mini_candles(dts, op, hi, lo, cl, img)
         brk_rows.append((s, nm, img.name))
 
-    # HTML
+    # ---------- Beauty Panel ----------
+    mom_metrics, brk_metrics = [], []
+    mom_dfs: dict[str, pd.DataFrame] = {}
+    for s in mom_syms:
+        df = fetch_ohlc_full(s, 400)
+        if df is None: continue
+        mom_dfs[s] = df
+        mom_metrics.append({
+            "sym": s, "name": name_of(s),
+            "price": df["close"].iloc[-1],
+            "ret63": ret63_pct(df),
+            "sig63": sigma63_pct(df),
+            "snr":   snr63(df),
+            "atrp":  atr14_pct(df)
+        })
+    for s, nm in brk_pairs:
+        df = fetch_ohlc_full(s, 400)
+        if df is None: continue
+        brk_metrics.append({
+            "sym": s, "name": nm or name_of(s),
+            "price": df["close"].iloc[-1],
+            "ret63": ret63_pct(df),
+            "sig63": sigma63_pct(df),
+            "snr":   snr63(df),
+            "atrp":  atr14_pct(df),
+            "gap70": gap_vs_prior70(df)
+        })
+
+    avg_corr, vol5, avg_atr = momentum_portfolio_stats(mom_dfs)
+
+    def table(rows, breakout=False):
+        if not rows: return ""
+        cols = ["Symbol","Name","Price","63d","σ₆₃","SNR","ATR₁₄%"] + (["Gap70%"] if breakout else [])
+        head = "".join(f"<th style='padding:6px 8px;text-align:left;font-weight:600;border-bottom:1px solid #eee'>{c}</th>" for c in cols)
+        body = []
+        for r in rows:
+            cells = [
+                r["sym"],
+                r["name"],
+                fmt(r["price"],2,False),
+                fmt(r["ret63"],2,True),
+                fmt(r["sig63"],2,True),
+                fmt(r["snr"],2,False),
+                fmt(r["atrp"],2,True)
+            ]
+            if breakout: cells.append(fmt(r.get("gap70", float("nan")),2,True))
+            tds = "".join(f"<td style='padding:6px 8px;border-bottom:1px solid #f6f6f6'>{c}</td>" for c in cells)
+            body.append(f"<tr>{tds}</tr>")
+        return (
+            "<table style='border-collapse:collapse;width:100%;margin:6px 0 10px 0'>"
+            f"<thead><tr>{head}</tr></thead><tbody>{''.join(body)}</tbody></table>"
+        )
+
+    beauty_block = (
+        "<div style='border:1px solid #e9ecef;border-radius:10px;padding:12px;margin:10px 0'>"
+        "<div style='font-weight:700;margin-bottom:6px'>Beauty panel — signal & risk</div>"
+        "<div style='color:#444;font-size:13px'>"
+        f"Momentum basket: avg pairwise corr <b>{fmt(avg_corr,2,False)}</b> · "
+        f"est EW vol (5d) <b>{fmt(vol5,2,True)}</b> · "
+        f"avg ATR₁₄ <b>{fmt(avg_atr,2,True)}</b>"
+        "</div>"
+        "</div>"
+        "<div style='margin-top:6px'><b>Momentum picks — metrics</b></div>"
+        f"{table(mom_metrics, breakout=False)}"
+        "<div style='margin-top:6px'><b>Breakouts — Top-10 metrics</b></div>"
+        f"{table(brk_metrics, breakout=True)}"
+    )
+
+    # ---------- HTML ----------
     html_parts = [
         "<!doctype html><meta charset='utf-8'>",
         "<div style='font:14px/1.5 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial,sans-serif'>",
         "<h2 style='margin:0 0 8px'>IW Bot — Weekly Summary</h2>",
+        beauty_block,
         section_html("Momentum picks (3-month mini-candles)", mom_rows),
         section_html("Breakouts — Top-10 (3-month mini-candles)", brk_rows),
         "<p style='color:#888;font-size:12px;margin-top:12px'>"
@@ -302,10 +462,11 @@ def main():
     # Console hints
     print(f"[email] momentum charts: {len(mom_rows)} @ ~{IMG_W}x{IMG_H}px")
     print(f"[email] breakout charts: {len(brk_rows)} @ ~{IMG_W}x{IMG_H}px")
+    print(f"[beauty] momentum metrics: {len(mom_metrics)} | breakout metrics: {len(brk_metrics)}")
     if hi70_path and hi70_path.exists():
-        print(f"[email] used: {hi70_path}")
+        print(f"[email] used hi70: {hi70_path}")
     else:
-        print("[email] WARNING: hi70 file not found, breakout section empty")
+        print("[email] WARNING: hi70 file not found, breakout section may be empty")
 
 
 if __name__ == "__main__":
