@@ -202,6 +202,16 @@ jobs:
             --topk     ${{ inputs.topk != '' && inputs.topk || '6' }}
 
 
+      - name: Beauty panel (signal & risk)
+        env:
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+        run: |
+          python tools/make_beauty_panel.py \
+            --picklist backtests/picklist_highrsi_trend.csv \
+            --hi70     backtests/hi70_thisweek.csv \
+            --topk     ${{ inputs.topk != '' && inputs.topk || '6' }}
+
+
       - name: Email weekly summary (HTML + inline charts)
         env:
           SMTP_HOST: smtp.gmail.com
