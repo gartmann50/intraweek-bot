@@ -15,23 +15,33 @@ import os, argparse, datetime as dt, requests, pandas as pd, pathlib as p
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
+import matplotlib.dates as mdates
+
 
 API = "https://api.polygon.io"
 KEY = (os.getenv("POLYGON_API_KEY") or "").strip()
 
-def bars(symbol: str, days: int) -> list[float]:
-    # Fetch more than needed (120d) and slice from the end
+def bars(symbol: str, days: int) -> tuple[list[dt.date], list[float]]:
+    """
+    Return (dates, closes) for the last `days` trading days.
+    """
     end = dt.date.today()
-    start = end - dt.timedelta(days=max(180, days*3))
+    start = end - dt.timedelta(days=max(200, int(days*4)))  # buffer
     url = f"{API}/v2/aggs/ticker/{symbol}/range/1/day/{start}/{end}"
     params = {"adjusted":"true","sort":"asc","limit":"50000","apiKey":KEY}
     try:
         j = requests.get(url, params=params, timeout=30).json()
-        xs = [float(x.get("c",0) or 0) for x in j.get("results",[]) or []]
-        xs = [x for x in xs if x>0]
-        return xs[-days:] if len(xs) >= days else xs
+        res = j.get("results") or []
+        dts = [dt.datetime.utcfromtimestamp(int(r["t"])/1000).date()
+               for r in res if r.get("c")]
+        cls = [float(r["c"]) for r in res if r.get("c")]
+        if len(cls) > days:
+            dts, cls = dts[-days:], cls[-days:]
+        return dts, cls
     except Exception:
-        return []
+        return [], []
+
 
 def name_of(symbol: str) -> str:
     # Try Polygon reference; fall back to symbol if missing
@@ -42,18 +52,42 @@ def name_of(symbol: str) -> str:
     except Exception:
         return symbol
 
-def sparkline(vals: list[float], out: p.Path):
-    if not vals:
+def mini_chart(dts: list[dt.date], vals: list[float], out: p.Path, months=False):
+    if not vals or not dts:  # nothing to draw
         return
-    fig = plt.figure(figsize=(2.4, 0.9), dpi=100)  # ~240x90 px
-    ax = fig.add_axes([0,0,1,1])
-    ax.plot(vals, linewidth=1.6)
-    # subtle baseline to make trends pop
-    ax.axhline(vals[0], linewidth=0.6, alpha=0.3)
-    ax.set_xticks([]); ax.set_yticks([]); ax.set_frame_on(False)
-    for spine in ax.spines.values(): spine.set_visible(False)
-    fig.savefig(out, bbox_inches="tight", pad_inches=0)
+
+    # ~half previous size; a bit higher DPI so labels stay crisp
+    fig = plt.figure(figsize=(1.2, 0.6), dpi=130)  # ≈ 156×78 px
+    ax  = fig.add_axes([0.10, 0.18, 0.86, 0.74])   # tight margins
+
+    ax.plot(dts, vals, linewidth=1.2)
+    ax.grid(alpha=0.18, linewidth=0.4)
+
+    # X axis: concise dates; month ticks for 3-month view
+    if months:
+        ax.xaxis.set_major_locator(mdates.MonthLocator())
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%b'))  # Jan→'Jan'
+    else:
+        loc = mdates.AutoDateLocator(minticks=2, maxticks=4)
+        ax.xaxis.set_major_locator(loc)
+        ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(loc))
+
+    # Y axis: 3 ticks (min, mid, max) with small font
+    vmin, vmax = min(vals), max(vals)
+    if vmin == vmax:
+        vmax = vmin * 1.01 + 0.01
+    ax.set_ylim(vmin - (vmax - vmin) * 0.05, vmax + (vmax - vmin) * 0.05)
+    ax.set_yticks(np.linspace(vmin, vmax, 3))
+    ax.tick_params(axis='x', labelsize=7, pad=1)
+    ax.tick_params(axis='y', labelsize=7, pad=1)
+
+    # keep frame subtle
+    for s in ax.spines.values():
+        s.set_visible(False)
+
+    fig.savefig(out, bbox_inches="tight", pad_inches=0.05)
     plt.close(fig)
+
 
 def read_topk_from_picklist(picklist: p.Path, topk: int) -> list[str]:
     df = pd.read_csv(picklist)
@@ -99,31 +133,39 @@ def main():
     for s in mom_syms:
         nm = name_of(s)
         img = outdir/f"MOM_{s}.png"
-        sparkline(bars(s, 22), img)   # ~1 month
+        dts, cls = bars(s, 22)              # ~1 month
+        mini_chart(dts, cls, img, months=False)
         mom_rows.append((s, nm, img.name))
+
 
     brk_rows = []
     for s, nm in brk_pairs:
         if not nm: nm = name_of(s)
         img = outdir/f"BO_{s}.png"
-        sparkline(bars(s, 66), img)   # ~3 months
+        dts, cls = bars(s, 63)              # ~3 months
+        mini_chart(dts, cls, img, months=True)
         brk_rows.append((s, nm, img.name))
 
+
     # HTML (inline by cid:filename)
-    def section(title, rows):
-        if not rows: return ""
-        lines=[f"<h3 style='margin:12px 0'>{title}</h3>",
-               "<table style='border-collapse:collapse;width:100%'>"]
-        for s, nm, img in rows:
-            lines.append(
-                "<tr>"
-                f"<td style='padding:6px 8px;width:260px'><img src='cid:{img}' width='240' height='90' style='display:block;border:0'></td>"
-                f"<td style='padding:6px 8px;vertical-align:middle'><div style='font-weight:600'>{s}</div>"
-                f"<div style='color:#666;font-size:13px'>{nm}</div></td>"
-                "</tr>"
-            )
-        lines.append("</table>")
-        return "\n".join(lines)
+  def section(title, rows):
+    if not rows: return ""
+    lines=[f"<h3 style='margin:12px 0'>{title}</h3>",
+           "<table style='border-collapse:collapse;width:100%'>"]
+    for s, nm, img in rows:
+        lines.append(
+            "<tr>"
+            f"<td style='padding:4px 6px;width:160px'>"
+            f"<img src='cid:{img}' width='140' height='70' "
+            f"style='display:block;border:0'></td>"
+            f"<td style='padding:4px 6px;vertical-align:middle'>"
+            f"<div style='font-weight:600'>{s}</div>"
+            f"<div style='color:#666;font-size:13px'>{nm}</div>"
+            "</td></tr>"
+        )
+    lines.append("</table>")
+    return "\n".join(lines)
+
 
     html = [
       "<!doctype html><meta charset='utf-8'>",
