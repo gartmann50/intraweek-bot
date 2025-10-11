@@ -8,7 +8,7 @@ Outputs in backtests/email_charts/:
 
 Inputs:
   --picklist backtests/picklist_highrsi_trend.csv
-  --hi70     backtests/hi70_thisweek.csv
+  --hi70     backtests/hi70_thisweek.csv  (optional; auto-discover if missing)
   --topk     6
   --outdir   backtests/email_charts
 
@@ -52,8 +52,7 @@ def bars(symbol: str, days: int) -> tuple[list[dt.date], list[float]]:
         dts = []
         cls = []
         for r in res:
-            c = r.get("c")
-            t = r.get("t")
+            c = r.get("c"); t = r.get("t")
             if c is None or t is None:
                 continue
             try:
@@ -115,7 +114,6 @@ def mini_chart(dts: list[dt.date], vals: list[float], out: p.Path, months: bool 
     ax.tick_params(axis='x', labelsize=7, pad=1)
     ax.tick_params(axis='y', labelsize=7, pad=1)
 
-    # Subtle frame
     for s in ax.spines.values():
         s.set_visible(False)
 
@@ -141,18 +139,38 @@ def read_topk_from_picklist(picklist: p.Path, topk: int) -> list[str]:
     return df["symbol"].dropna().astype(str).head(int(topk)).tolist()
 
 
-def read_breakouts(hi70: p.Path, topN: int = 10) -> list[tuple[str, str]]:
-    """Read breakouts CSV: returns list of (symbol, name). Name may be blank."""
-    if not hi70.exists():
+def find_hi70_csv(default: p.Path = p.Path("backtests/hi70_thisweek.csv")) -> p.Path | None:
+    """
+    Locate hi70_thisweek.csv if present anywhere under backtests/.
+    Prefer the newest by modification time.
+    """
+    if default.exists():
+        return default
+    root = p.Path("backtests")
+    if not root.exists():
+        return None
+    candidates = list(root.glob("**/hi70_thisweek.csv"))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: x.stat().st_mtime, reverse=True)
+    return candidates[0]
+
+
+def read_breakouts(hi70_path: p.Path | None, topN: int = 10) -> list[tuple[str, str]]:
+    """
+    Read breakouts CSV: returns list of (symbol, name).
+    If name is empty/missing, the caller will populate via Polygon.
+    """
+    if not hi70_path or not hi70_path.exists():
         return []
-    df = pd.read_csv(hi70)
-    out = []
+    df = pd.read_csv(hi70_path)
+    rows = []
     for _, r in df.head(topN).iterrows():
         sym = str(r.get("symbol") or "").upper()
-        nm = str(r.get("name") or "")
+        nm  = str(r.get("name") or "")
         if sym:
-            out.append((sym, nm))
-    return out
+            rows.append((sym, nm))
+    return rows
 
 
 def section_html(title: str, rows: list[tuple[str, str, str]]) -> str:
@@ -167,8 +185,7 @@ def section_html(title: str, rows: list[tuple[str, str, str]]) -> str:
         lines.append(
             "<tr>"
             f"<td style='padding:4px 6px;width:160px'>"
-            f"<img src='cid:{img}' width='140' height='70' "
-            f"style='display:block;border:0'></td>"
+            f"<img src='cid:{img}' width='140' height='70' style='display:block;border:0'></td>"
             f"<td style='padding:4px 6px;vertical-align:middle'>"
             f"<div style='font-weight:600'>{s}</div>"
             f"<div style='color:#666;font-size:13px'>{nm}</div>"
@@ -195,18 +212,24 @@ def main():
     outdir.mkdir(parents=True, exist_ok=True)
 
     # Momentum symbols (Top-K, latest week)
-    mom_syms = []
     try:
         mom_syms = read_topk_from_picklist(p.Path(args.picklist), args.topk)
     except Exception:
         mom_syms = []
 
-    # Breakouts (symbol, name) — take 10
+    # Breakouts CSV: use given path if it exists, otherwise discover latest
+    hi70_path = p.Path(args.hi70)
+    if not hi70_path.exists():
+        hi70_path = find_hi70_csv(hi70_path)
+    print(f"[email] hi70 CSV: {hi70_path if hi70_path else '(not found)'}")
+
+    # Breakouts (symbol, name)
     try:
-        brk_pairs = read_breakouts(p.Path(args.hi70), 10)
+        brk_pairs = read_breakouts(hi70_path, 10)
     except Exception:
         brk_pairs = []
 
+    # Build images
     mom_rows: list[tuple[str, str, str]] = []
     for s in mom_syms:
         nm  = name_of(s)
@@ -238,9 +261,12 @@ def main():
     (outdir / "email.html").write_text("\n".join(html_parts), encoding="utf-8")
 
     # Console hints
-    print(f"[email] momentum: {len(mom_rows)} charts")
-    print(f"[email] breakouts: {len(brk_rows)} charts")
-    print(f"[email] wrote: {outdir/'email.html'}")
+    print(f"[email] momentum count: {len(mom_rows)}")
+    print(f"[email] breakouts count: {len(brk_rows)}")
+    if hi70_path and hi70_path.exists():
+        print(f"[email] used: {hi70_path}")
+    else:
+        print("[email] WARNING: hi70 file not found, breakout section empty")
 
 
 if __name__ == "__main__":
