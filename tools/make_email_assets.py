@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Builds candlestick mini-charts + HTML for the weekly email.
+Builds candlestick mini-charts + HTML for the weekly email, with
+WEEKENDS REMOVED (compressed to trading-day index).
 
 Outputs in backtests/email_charts/:
   - PNG mini-charts (momentum & breakout) as candlesticks
@@ -29,7 +30,6 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")  # ensure headless backend
 import matplotlib.pyplot as plt
-import matplotlib.dates as mdates
 from matplotlib.patches import Rectangle
 
 API = "https://api.polygon.io"
@@ -39,7 +39,7 @@ UP_COLOR = "#2ca02c"
 DN_COLOR = "#d62728"
 
 
-# ----------------- helpers -----------------
+# ----------------- data fetch -----------------
 
 def ohlc(symbol: str, days: int) -> tuple[list[dt.date], list[float], list[float], list[float], list[float]]:
     """
@@ -56,13 +56,10 @@ def ohlc(symbol: str, days: int) -> tuple[list[dt.date], list[float], list[float
         dts, opn, high, low, cls = [], [], [], [], []
         for r in res:
             o = r.get("o"); h = r.get("h"); l = r.get("l"); c = r.get("c"); t = r.get("t")
-            if None in (o, h, l, c, t):  # require full OHLC
+            if None in (o, h, l, c, t):
                 continue
-            try:
-                dts.append(dt.datetime.utcfromtimestamp(int(t) / 1000).date())
-                opn.append(float(o)); high.append(float(h)); low.append(float(l)); cls.append(float(c))
-            except Exception:
-                continue
+            dts.append(dt.datetime.utcfromtimestamp(int(t) / 1000).date())
+            opn.append(float(o)); high.append(float(h)); low.append(float(l)); cls.append(float(c))
         if len(cls) > days:
             dts, opn, high, low, cls = dts[-days:], opn[-days:], high[-days:], low[-days:], cls[-days:]
         return dts, opn, high, low, cls
@@ -80,6 +77,40 @@ def name_of(symbol: str) -> str:
         return symbol
 
 
+# ----------------- plotting (compressed trading axis) -----------------
+
+def _tick_positions_and_labels(dts: list[dt.date], months: bool) -> tuple[list[int], list[str]]:
+    """
+    Build compact, human-friendly X tick positions/labels on a trading-day index.
+    - For 3-month (months=True): tick at first trading day of each month.
+    - For ~1-month (months=False): ~3-4 evenly spaced ticks with day+mon labels.
+    """
+    n = len(dts)
+    if n == 0:
+        return [], []
+
+    if months:
+        # first index of each month
+        pos = []
+        lab = []
+        seen = set()
+        for i, d in enumerate(dts):
+            key = (d.year, d.month)
+            if key not in seen:
+                seen.add(key)
+                pos.append(i)
+                lab.append(d.strftime("%b"))  # Jan, Feb, ...
+        if pos[-1] != n - 1:
+            pos.append(n - 1); lab.append(dts[-1].strftime("%b"))
+        return pos, lab
+    else:
+        # ~1m view: 3–4 ticks (start, mid, end)
+        k = 4 if n >= 18 else 3
+        pos = sorted(set([0, n - 1] + [round(i) for i in np.linspace(0, n - 1, k)]))
+        lab = [dts[i].strftime("%d %b") for i in pos]  # e.g., "07 Oct"
+        return pos, lab
+
+
 def mini_candles(
     dts: list[dt.date],
     o: list[float], h: list[float], l: list[float], c: list[float],
@@ -87,10 +118,10 @@ def mini_candles(
     months: bool = False
 ):
     """
-    Render a compact candlestick chart with axes:
-      - X: concise dates (month ticks if months=True)
+    Render a compact candlestick chart with axes using TRADING-DAY INDEX on X:
+      - X: integer index (no weekend gaps) with date string tick labels
       - Y: price ticks (min/mid/max)
-    Size ~ half of the previous version (~140x70 px).
+    Size ~ 140x70 px.
     """
     if not dts or not c:
         return
@@ -99,12 +130,9 @@ def mini_candles(
     fig = plt.figure(figsize=(1.2, 0.6), dpi=130)
     ax = fig.add_axes([0.10, 0.18, 0.86, 0.74])
 
-    x = mdates.date2num(dts)
-    # bar width ~80% of the minimum spacing (falls back if single bar)
-    if len(x) > 1:
-        width = np.diff(np.unique(x)).min() * 0.8
-    else:
-        width = 0.6  # arbitrary when only one bar
+    x = np.arange(len(dts), dtype=float)
+    # bar width ~80% of spacing
+    width = 0.8
 
     # Draw wicks + bodies
     for xi, oi, hi, lo, ci in zip(x, o, h, l, c):
@@ -112,25 +140,20 @@ def mini_candles(
         # wick
         ax.vlines(xi, lo, hi, colors=color, linewidth=0.6, alpha=0.9)
         # body
-        y0 = min(oi, ci)
-        bh = abs(ci - oi)
-        if bh < (max(1e-6, (hi - lo) * 0.02)):  # doji-ish: draw a thin line
+        y0 = min(oi, ci); bh = abs(ci - oi)
+        if bh < max(1e-6, (hi - lo) * 0.02):  # doji-ish
             ax.hlines((oi + ci) / 2.0, xi - width/2, xi + width/2, colors=color, linewidth=0.8, alpha=0.9)
         else:
             rect = Rectangle((xi - width/2, y0), width, bh, facecolor=color, edgecolor=color, linewidth=0.8, alpha=0.9)
             ax.add_patch(rect)
 
-    ax.set_xlim(x.min() - width, x.max() + width)
+    ax.set_xlim(-0.5, x.max() + 0.5)
     ax.grid(alpha=0.18, linewidth=0.4)
 
-    # X axis formatting
-    if months:
-        ax.xaxis.set_major_locator(mdates.MonthLocator())
-        ax.xaxis.set_major_formatter(mdates.DateFormatter('%b'))  # Jan, Feb, ...
-    else:
-        loc = mdates.AutoDateLocator(minticks=2, maxticks=4)
-        ax.xaxis.set_major_locator(loc)
-        ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(loc))
+    # X ticks: positions on index, labels from dates
+    pos, lab = _tick_positions_and_labels(dts, months=months)
+    ax.set_xticks(pos)
+    ax.set_xticklabels(lab, fontsize=7)
 
     # Y axis: min/mid/max
     vmin = float(min(l)); vmax = float(max(h))
@@ -139,8 +162,6 @@ def mini_candles(
     pad = (vmax - vmin) * 0.05
     ax.set_ylim(vmin - pad, vmax + pad)
     ax.set_yticks(np.linspace(vmin, vmax, 3))
-
-    ax.tick_params(axis='x', labelsize=7, pad=1)
     ax.tick_params(axis='y', labelsize=7, pad=1)
 
     for s in ax.spines.values():
@@ -149,6 +170,8 @@ def mini_candles(
     fig.savefig(out, bbox_inches="tight", pad_inches=0.05)
     plt.close(fig)
 
+
+# ----------------- CSV helpers -----------------
 
 def read_topk_from_picklist(picklist: p.Path, topk: int) -> list[str]:
     """From picklist CSV, take the latest week and return Top-K symbols."""
@@ -159,12 +182,10 @@ def read_topk_from_picklist(picklist: p.Path, topk: int) -> list[str]:
         if len(latest):
             last_week = str(latest.max())
             df = df[pd.to_datetime(df[wk], errors="coerce").dt.date.astype(str) == last_week].copy()
-
     if "rank" in df.columns:
         df = df.sort_values(["rank", "symbol"], ascending=[True, True])
     elif "score" in df.columns:
         df = df.sort_values(["score", "symbol"], ascending=[False, True])
-
     return df["symbol"].dropna().astype(str).head(int(topk)).tolist()
 
 
@@ -278,7 +299,7 @@ def main():
         section_html("Momentum picks (1-month mini-charts)", mom_rows),
         section_html("Breakouts — Top-10 (3-month mini-charts)", brk_rows),
         "<p style='color:#888;font-size:12px;margin-top:12px'>"
-        "Mini-charts: daily candlesticks; for context, consult your platform."
+        "Mini-charts: daily candlesticks; weekends compressed out."
         "</p></div>"
     ]
     (outdir / "email.html").write_text("\n".join(html_parts), encoding="utf-8")
