@@ -5,6 +5,8 @@ WEEKENDS REMOVED (compressed to trading-day index).
 
 Both sections (Momentum & Breakouts) use ~3 months of daily bars.
 
+Chart size is doubled vs prior version (~280x140 px each).
+
 Outputs in backtests/email_charts/:
   - PNG mini-charts (momentum & breakout) as candlesticks
   - email.html (embeds charts by cid:filename)
@@ -40,13 +42,22 @@ KEY = (os.getenv("POLYGON_API_KEY") or "").strip()
 UP_COLOR = "#2ca02c"
 DN_COLOR = "#d62728"
 
+# ===== Size & style (easy to tweak) =====
+FIG_W_IN = 2.4     # inches  (was 1.2)
+FIG_H_IN = 1.2     # inches  (was 0.6)
+DPI      = 130     # => ~312x156 canvas before bbox trim
+IMG_W    = 280     # HTML width attribute (px) ~2x previous 140
+IMG_H    = 140     # HTML height attribute (px)
+TICK_FONTSZ = 9    # axis tick font size (was 7)
+CELL_W   = 320     # table cell width to fit the larger image
+
 
 # ----------------- data fetch -----------------
 
 def ohlc(symbol: str, days: int) -> tuple[list[dt.date], list[float], list[float], list[float], list[float]]:
     """
     Fetch daily bars and return (dates, opens, highs, lows, closes)
-    for the last `days` trading days. Uses a buffer to ensure enough data.
+    for the last `days` TRADING days. Uses a buffer to ensure enough data.
     """
     end = dt.date.today()
     start = end - dt.timedelta(days=max(200, int(days * 4)))  # generous buffer
@@ -81,19 +92,14 @@ def name_of(symbol: str) -> str:
 
 # ----------------- plotting (compressed trading axis) -----------------
 
-def _tick_positions_and_labels(dts: list[dt.date], months: bool) -> tuple[list[int], list[str]]:
+def _tick_positions_and_labels(dts: list[dt.date]) -> tuple[list[int], list[str]]:
     """
-    Build compact, human-friendly X tick positions/labels on a trading-day index.
-    - For 3-month views (months=True): tick at first trading day of each month plus the last day.
+    Month-based ticks on trading-day index: first trading day of each month + last day.
     """
     n = len(dts)
     if n == 0:
         return [], []
-
-    # month ticks (used for both sections now)
-    pos = []
-    lab = []
-    seen = set()
+    pos, lab, seen = [], [], set()
     for i, d in enumerate(dts):
         key = (d.year, d.month)
         if key not in seen:
@@ -108,20 +114,17 @@ def _tick_positions_and_labels(dts: list[dt.date], months: bool) -> tuple[list[i
 def mini_candles(
     dts: list[dt.date],
     o: list[float], h: list[float], l: list[float], c: list[float],
-    out: p.Path,
-    months: bool = True
+    out: p.Path
 ):
     """
     Render a compact candlestick chart with axes using TRADING-DAY INDEX on X:
       - X: integer index (no weekend gaps) with month tick labels
       - Y: price ticks (min/mid/max)
-    Size ~ 140x70 px.
     """
     if not dts or not c:
         return
 
-    # ~156x78 px at dpi=130
-    fig = plt.figure(figsize=(1.2, 0.6), dpi=130)
+    fig = plt.figure(figsize=(FIG_W_IN, FIG_H_IN), dpi=DPI)
     ax = fig.add_axes([0.10, 0.18, 0.86, 0.74])
 
     x = np.arange(len(dts), dtype=float)
@@ -130,23 +133,22 @@ def mini_candles(
     # Draw wicks + bodies
     for xi, oi, hi, lo, ci in zip(x, o, h, l, c):
         color = UP_COLOR if ci >= oi else DN_COLOR
-        # wick
-        ax.vlines(xi, lo, hi, colors=color, linewidth=0.6, alpha=0.9)
-        # body
+        ax.vlines(xi, lo, hi, colors=color, linewidth=0.8, alpha=0.95)  # thicker for bigger chart
         y0 = min(oi, ci); bh = abs(ci - oi)
         if bh < max(1e-6, (hi - lo) * 0.02):  # doji-ish
-            ax.hlines((oi + ci) / 2.0, xi - width/2, xi + width/2, colors=color, linewidth=0.8, alpha=0.9)
+            ax.hlines((oi + ci) / 2.0, xi - width/2, xi + width/2, colors=color, linewidth=1.0, alpha=0.95)
         else:
-            rect = Rectangle((xi - width/2, y0), width, bh, facecolor=color, edgecolor=color, linewidth=0.8, alpha=0.9)
+            rect = Rectangle((xi - width/2, y0), width, bh,
+                             facecolor=color, edgecolor=color, linewidth=0.9, alpha=0.95)
             ax.add_patch(rect)
 
     ax.set_xlim(-0.5, x.max() + 0.5)
-    ax.grid(alpha=0.18, linewidth=0.4)
+    ax.grid(alpha=0.20, linewidth=0.5)
 
     # X ticks: positions on index, labels from dates (months)
-    pos, lab = _tick_positions_and_labels(dts, months=True)
+    pos, lab = _tick_positions_and_labels(dts)
     ax.set_xticks(pos)
-    ax.set_xticklabels(lab, fontsize=7)
+    ax.set_xticklabels(lab, fontsize=TICK_FONTSZ)
 
     # Y axis: min/mid/max
     vmin = float(min(l)); vmax = float(max(h))
@@ -155,7 +157,7 @@ def mini_candles(
     pad = (vmax - vmin) * 0.05
     ax.set_ylim(vmin - pad, vmax + pad)
     ax.set_yticks(np.linspace(vmin, vmax, 3))
-    ax.tick_params(axis='y', labelsize=7, pad=1)
+    ax.tick_params(axis='y', labelsize=TICK_FONTSZ, pad=1)
 
     for s in ax.spines.values():
         s.set_visible(False)
@@ -221,11 +223,11 @@ def section_html(title: str, rows: list[tuple[str, str, str]]) -> str:
     for s, nm, img in rows:
         lines.append(
             "<tr>"
-            f"<td style='padding:4px 6px;width:160px'>"
-            f"<img src='cid:{img}' width='140' height='70' style='display:block;border:0'></td>"
-            f"<td style='padding:4px 6px;vertical-align:middle'>"
+            f"<td style='padding:6px 8px;width:{CELL_W}px'>"
+            f"<img src='cid:{img}' width='{IMG_W}' height='{IMG_H}' style='display:block;border:0'></td>"
+            f"<td style='padding:6px 8px;vertical-align:middle'>"
             f"<div style='font-weight:600'>{s}</div>"
-            f"<div style='color:#666;font-size:13px'>{nm}</div>"
+            f"<div style='color:#666;font-size:14px'>{nm}</div>"
             "</td></tr>"
         )
     lines.append("</table>")
@@ -272,7 +274,7 @@ def main():
         nm  = name_of(s)
         img = outdir / f"MOM_{s}.png"
         dts, op, hi, lo, cl = ohlc(s, 63)  # ~3 months
-        mini_candles(dts, op, hi, lo, cl, img, months=True)
+        mini_candles(dts, op, hi, lo, cl, img)
         mom_rows.append((s, nm, img.name))
 
     brk_rows: list[tuple[str, str, str]] = []
@@ -281,13 +283,13 @@ def main():
             nm = name_of(s)
         img = outdir / f"BO_{s}.png"
         dts, op, hi, lo, cl = ohlc(s, 63)  # ~3 months
-        mini_candles(dts, op, hi, lo, cl, img, months=True)
+        mini_candles(dts, op, hi, lo, cl, img)
         brk_rows.append((s, nm, img.name))
 
     # HTML
     html_parts = [
         "<!doctype html><meta charset='utf-8'>",
-        "<div style='font:14px/1.4 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial,sans-serif'>",
+        "<div style='font:14px/1.5 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Arial,sans-serif'>",
         "<h2 style='margin:0 0 8px'>IW Bot — Weekly Summary</h2>",
         section_html("Momentum picks (3-month mini-candles)", mom_rows),
         section_html("Breakouts — Top-10 (3-month mini-candles)", brk_rows),
@@ -298,8 +300,8 @@ def main():
     (outdir / "email.html").write_text("\n".join(html_parts), encoding="utf-8")
 
     # Console hints
-    print(f"[email] momentum count: {len(mom_rows)}")
-    print(f"[email] breakouts count: {len(brk_rows)}")
+    print(f"[email] momentum charts: {len(mom_rows)} @ ~{IMG_W}x{IMG_H}px")
+    print(f"[email] breakout charts: {len(brk_rows)} @ ~{IMG_W}x{IMG_H}px")
     if hi70_path and hi70_path.exists():
         print(f"[email] used: {hi70_path}")
     else:
