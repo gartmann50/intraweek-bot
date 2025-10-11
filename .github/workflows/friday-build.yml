@@ -186,13 +186,27 @@ jobs:
           sed -n '1,12p' "$HI70_CSV"
 
       
+      - name: Build mini-charts + HTML
+        env:
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+        run: |
+          python tools/make_email_assets.py \
+            --picklist backtests/picklist_highrsi_trend.csv \
+            --hi70     backtests/hi70_thisweek.csv \
+            --topk     ${{ inputs.topk != '' && inputs.topk || '6' }}
 
+      - name: Email weekly summary (HTML + inline charts)
+        env:
+          SMTP_HOST: smtp.gmail.com
+          SMTP_PORT: "587"
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          SMTP_TO:   ${{ secrets.SMTP_TO }}
+          EMAIL_SUBJECT: "IW Bot — Weekly Picks ${{ steps.when.outputs.friday }}"
+        run: python tools/send_weekly_html.py
 
-      - name: Options snapshot — Picks (disabled)
-        run: echo "Options snapshot disabled for now."
-
-      - name: Options snapshot — 70D breakouts (disabled)
-        run: echo "Options snapshot disabled for now."
+ 
 
       - name: Compose email body (weekly picks + Top-10 70D highs)
         shell: bash
