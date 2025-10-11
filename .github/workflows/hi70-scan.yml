@@ -88,22 +88,28 @@ jobs:
             --allow-file backtests/universe_topvol.txt
 
 
+      # 1) Scan the market (keep your usual thresholds)
       - name: Scan 70D highs (full market → top by $ volume)
         env:
           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
         run: |
-          set -xeuo pipefail
-          mkdir -p backtests
           python tools/scan_70d_highs.py \
             --since-days 130 \
-            --top "${{ inputs.top || '10' }}" \
-            --topvol "${{ inputs.topvol || '1000' }}" \
-            --cap-min "${{ inputs.cap_min || '1000000000' }}" \
-            --min-price "${{ inputs.min_price || '5' }}" \
-            --min-dollar-vol "${{ inputs.min_dollar_vol || '10000000' }}" \
-            $([ -n "${{ inputs.anchor_friday }}" ] && echo --anchor-friday "${{ inputs.anchor_friday }}") \
-            $([ '${{ inputs.use_current_week }}' = 'true' ] && echo --use-current-week) \
-            --out-dir backtests
+            --pages 5 \
+            --top 10 \
+            --out-dir backtests \
+            --cap-min 1000000000 \
+            --min-price 5 \
+            --min-dollar-vol 10000000
+      
+      # 2) Filter the results to your shared universe
+      - name: Filter hi70 to shared universe
+        run: |
+          python tools/filter_picklist_by_symbols.py \
+            backtests/universe_topvol.txt \
+            backtests/hi70_thisweek.csv \
+            backtests/hi70_thisweek.csv
+
 
       - name: Probe hi70 outputs
         run: |
