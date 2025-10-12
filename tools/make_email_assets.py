@@ -1,22 +1,42 @@
 #!/usr/bin/env python3
 """
-IW Bot — Weekly HTML builder (Calm theme, charts only)
-- 3-month candlestick mini-charts, weekends compressed (trading-day index)
-- EMA(20) overlay + price/3m% badge
-- Two-column rounded "cards" with optional metric chips
-- NO top “Beauty panel” block (no tables, no portfolio stats)
+IW Bot — Weekly HTML builder (Calm theme, charts only, styled headers)
 
-Outputs:
-  backtests/email_charts/email.html
-  backtests/email_charts/MOM_<sym>.png, BO_<sym>.png
+What it does
+- Builds a pretty email HTML with two sections:
+  * Momentum picks (Top-K) — 3-month mini candlestick charts
+  * Breakouts (Top-10, 70-day highs) — 3-month mini candlestick charts
+- Candles with EMA(20), price + 3-month % badge
+- Two-column rounded "cards" per symbol, optional metric chips
+- NO top “Beauty panel” (no big tables, no portfolio stats)
+- Email-safe (tables + inline CSS, system font stack)
 
-Env: POLYGON_API_KEY
+Outputs
+  backtests/email_charts/
+    ├─ email.html
+    ├─ MOM_<SYM>.png
+    └─ BO_<SYM>.png
+
+Inputs
+  --picklist  backtests/picklist_highrsi_trend.csv
+  --hi70      backtests/hi70_thisweek.csv (auto-discover if missing)
+  --topk      default 6
+  --outdir    default backtests/email_charts
+
+Env
+  POLYGON_API_KEY   (required for charts & names)
 """
 
 from __future__ import annotations
-import os, argparse, datetime as dt, pathlib as p, numpy as np, pandas as pd, requests
+import os
+import argparse
+import datetime as dt
+import pathlib as p
+import numpy as np
+import pandas as pd
+import requests
 
-# ---------- THEME (Calm) ----------
+# ---------------- THEME (Calm) ----------------
 THEME = {
     "page_bg":     "#FAFAF7",
     "text":        "#2D2A32",
@@ -32,10 +52,40 @@ THEME = {
     "grid":        "#ECE9F1",
 }
 
+# Email-safe system font stack (harmonizes with the charts’ minimal look)
+FONT_STACK = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, 'Apple Color Emoji','Segoe UI Emoji'"
+
+H2_STYLE = (
+    f"margin:0 0 12px;"
+    f"color:{THEME['text']};"
+    f"font-family:{FONT_STACK};"
+    f"font-weight:600;"
+    f"font-size:22px;"
+    f"letter-spacing:0.2px;"
+    f"line-height:1.25;"
+)
+
+H3_STYLE = (
+    f"margin:14px 0 8px;"
+    f"color:{THEME['text']};"
+    f"font-family:{FONT_STACK};"
+    f"font-weight:600;"
+    f"font-size:15px;"
+    f"letter-spacing:0.25px;"
+    f"line-height:1.3;"
+    f"border-left:3px solid {THEME['card_border']};"
+    f"padding-left:8px;"
+)
+
+BODY_WRAPPER_STYLE = (
+    f"max-width:820px;margin:0 auto;background:{THEME['page_bg']};"
+    f"font-family:{FONT_STACK};color:{THEME['text']};"
+)
+
 # Toggle metric chips under each card (set False to hide)
 SHOW_CHIPS = True
 
-# ---------- plotting setup ----------
+# --------------- plotting ----------------
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -52,22 +102,27 @@ CELL_W     = 360
 API = "https://api.polygon.io"
 KEY = (os.getenv("POLYGON_API_KEY") or "").strip()
 
-# ---------- data ----------
+# --------------- data fetch ----------------
 def ohlc(symbol: str, days: int):
+    """Fetch daily OHLC; returns last `days` trading bars."""
     end = dt.date.today()
     start = end - dt.timedelta(days=max(200, int(days*4)))
     url = f"{API}/v2/aggs/ticker/{symbol}/range/1/day/{start}/{end}"
     try:
-        j = requests.get(url, params={"adjusted":"true","sort":"asc","limit":"50000","apiKey":KEY}, timeout=30).json()
+        j = requests.get(
+            url,
+            params={"adjusted":"true","sort":"asc","limit":"50000","apiKey":KEY},
+            timeout=30
+        ).json()
         res = j.get("results") or []
         dts, opn, hi, lo, cls = [], [], [], [], []
         for r in res:
-            o,h,l,c,t = r.get("o"),r.get("h"),r.get("l"),r.get("c"),r.get("t")
+            o,h,l,c,t = r.get("o"), r.get("h"), r.get("l"), r.get("c"), r.get("t")
             if None in (o,h,l,c,t): continue
             dts.append(dt.datetime.utcfromtimestamp(int(t)/1000).date())
             opn.append(float(o)); hi.append(float(h)); lo.append(float(l)); cls.append(float(c))
         if len(cls) > days:
-            dts,opn,hi,lo,cls = dts[-days:],opn[-days:],hi[-days:],lo[-days:],cls[-days:]
+            dts,opn,hi,lo,cls = dts[-days:], opn[-days:], hi[-days:], lo[-days:], cls[-days:]
         return dts,opn,hi,lo,cls
     except Exception:
         return [],[],[],[],[]
@@ -79,7 +134,9 @@ def fetch_ohlc_full(symbol: str, lookback_days: int = 400) -> pd.DataFrame|None:
     j = requests.get(url, params={"adjusted":"true","sort":"asc","limit":"50000","apiKey":KEY}, timeout=30).json()
     rows = j.get("results") or []
     if not rows: return None
-    df = pd.DataFrame(rows)[["t","o","h","l","c","v"]].rename(columns={"t":"ts","o":"open","h":"high","l":"low","c":"close","v":"vol"})
+    df = pd.DataFrame(rows)[["t","o","h","l","c","v"]].rename(
+        columns={"t":"ts","o":"open","h":"high","l":"low","c":"close","v":"vol"}
+    )
     df["date"] = pd.to_datetime(df["ts"], unit="ms").dt.date
     return df
 
@@ -90,7 +147,7 @@ def name_of(symbol: str) -> str:
     except Exception:
         return symbol
 
-# ---------- helpers: picklists ----------
+# --------------- helpers: picklists ----------------
 def read_topk_from_picklist(picklist: p.Path, topk: int) -> list[str]:
     df = pd.read_csv(picklist)
     wk = "week_start" if "week_start" in df.columns else ("week" if "week" in df.columns else None)
@@ -124,7 +181,7 @@ def read_breakouts(hi70_path: p.Path|None, topN: int = 10) -> list[tuple[str,str
         if sym: rows.append((sym,nm))
     return rows
 
-# ---------- light metrics for chips (optional) ----------
+# --------------- light metrics for optional chips ----------------
 def atr14_pct(df: pd.DataFrame) -> float:
     c = df["close"].to_numpy(float)
     h = df["high"].to_numpy(float)
@@ -156,7 +213,7 @@ def fmt(x, prec=2, pct=False):
     if not np.isfinite(x): return "—"
     return f"{x:.{prec}f}{'%' if pct else ''}"
 
-# ---------- plotting ----------
+# --------------- plotting ----------------
 def _tick_positions_and_labels(dts: list[dt.date]):
     if not dts: return [],[]
     pos, lab, seen = [], [], set()
@@ -211,7 +268,7 @@ def mini_candles(dts,o,h,l,c,outpath: p.Path):
 
     for s in ax.spines.values(): s.set_visible(False)
 
-    # price badge
+    # price badge (last price + 3-month pct)
     try:
         pct = 100.0*(ca[-1]/ca[0]-1.0)
         lbl = f"{ca[-1]:.2f}  ({pct:+.1f}%)"
@@ -226,7 +283,7 @@ def mini_candles(dts,o,h,l,c,outpath: p.Path):
     fig.savefig(outpath, bbox_inches="tight", pad_inches=0.05)
     plt.close(fig)
 
-# ---------- HTML ----------
+# --------------- HTML ----------------
 def chip(label: str) -> str:
     return (f"<span style='display:inline-block;background:{THEME['chip_bg']};"
             f"border:1px solid {THEME['chip_border']};border-radius:999px;"
@@ -256,7 +313,7 @@ def card(sym: str, name: str, img: str, met: dict|None) -> str:
 def section_cards(title: str, rows: list[tuple[str,str,str]], metrics: dict[str,dict]) -> str:
     if not rows: return ""
     html = [
-        f"<h3 style='margin:12px 0;color:{THEME['text']}'>{title}</h3>",
+        f"<h3 style=\"{H3_STYLE}\">{title}</h3>",
         "<table role='presentation' cellspacing='0' cellpadding='0' style='width:100%'>"
     ]
     for i in range(0, len(rows), 2):
@@ -272,9 +329,10 @@ def section_cards(title: str, rows: list[tuple[str,str,str]], metrics: dict[str,
     html.append("</table>")
     return "\n".join(html)
 
-# ---------- main ----------
+# --------------- main ----------------
 def main():
-    if not KEY: raise SystemExit("FATAL: POLYGON_API_KEY is missing")
+    if not KEY:
+        raise SystemExit("FATAL: POLYGON_API_KEY is missing")
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--picklist", default="backtests/picklist_highrsi_trend.csv")
@@ -283,7 +341,8 @@ def main():
     ap.add_argument("--outdir",   default="backtests/email_charts")
     args = ap.parse_args()
 
-    outdir = p.Path(args.outdir); outdir.mkdir(parents=True, exist_ok=True)
+    outdir = p.Path(args.outdir)
+    outdir.mkdir(parents=True, exist_ok=True)
 
     # momentum list
     try:
@@ -293,7 +352,8 @@ def main():
 
     # breakouts list
     hi70_path = p.Path(args.hi70)
-    if not hi70_path.exists(): hi70_path = find_hi70_csv(hi70_path)
+    if not hi70_path.exists():
+        hi70_path = find_hi70_csv(hi70_path)
     print(f"[email] hi70 CSV: {hi70_path if hi70_path else '(not found)'}")
     try:
         brk_pairs = read_breakouts(hi70_path, 10)
@@ -301,13 +361,15 @@ def main():
         brk_pairs = []
 
     # charts
-    mom_rows=[]; brk_rows=[]
+    mom_rows: list[tuple[str,str,str]] = []
     for s in mom_syms:
         nm = name_of(s)
         img = outdir / f"MOM_{s}.png"
         dts,op,hi,lo,cl = ohlc(s, 63)
         mini_candles(dts,op,hi,lo,cl,img)
         mom_rows.append((s,nm,img.name))
+
+    brk_rows: list[tuple[str,str,str]] = []
     for s,nm in brk_pairs:
         nm = nm or name_of(s)
         img = outdir / f"BO_{s}.png"
@@ -316,36 +378,41 @@ def main():
         brk_rows.append((s,nm,img.name))
 
     # optional chip metrics (light compute)
-    mom_metrics_map={}; brk_metrics_map={}
+    mom_metrics_map: dict[str,dict] = {}
+    brk_metrics_map: dict[str,dict] = {}
     if SHOW_CHIPS:
         for s in mom_syms:
             df = fetch_ohlc_full(s, 400)
             if df is None: continue
             mom_metrics_map[s] = {
-                "ret63":ret63_pct(df),"sig63":sigma63_pct(df),
-                "snr":snr63(df),"atrp":atr14_pct(df)
+                "ret63":ret63_pct(df),
+                "sig63":sigma63_pct(df),
+                "snr":snr63(df),
+                "atrp":atr14_pct(df)
             }
         for s,_ in brk_pairs:
             df = fetch_ohlc_full(s, 400)
             if df is None: continue
             brk_metrics_map[s] = {
-                "ret63":ret63_pct(df),"sig63":sigma63_pct(df),
-                "snr":snr63(df),"atrp":atr14_pct(df)
+                "ret63":ret63_pct(df),
+                "sig63":sigma63_pct(df),
+                "snr":snr63(df),
+                "atrp":atr14_pct(df)
             }
 
-    # HTML (charts only; no beauty panel tables)
+    # HTML (charts only; styled headers)
     html_parts = [
         "<!doctype html><meta charset='utf-8'>",
         f"<div style='background:{THEME['page_bg']};padding:12px;'>",
-        f"<div style='max-width:820px;margin:0 auto;background:{THEME['page_bg']};'>",
-        f"<h2 style='margin:0 0 8px;color:{THEME['text']}'>IW Bot — Weekly Summary</h2>",
+        f"<div style='{BODY_WRAPPER_STYLE}'>",
+        f"<h2 style=\"{H2_STYLE}\">IW Bot — Weekly Summary</h2>",
         section_cards("Momentum picks (3-month mini-candles)", mom_rows, mom_metrics_map),
         section_cards("Breakouts — Top-10 (3-month mini-candles)", brk_rows, brk_metrics_map),
         f"<p style='color:{THEME['muted']};font-size:12px;margin-top:12px'>"
         "Mini-charts: daily candlesticks with EMA(20); weekends compressed out."
         "</p></div></div>"
     ]
-    (p.Path(args.outdir)/"email.html").write_text("\n".join(html_parts), encoding="utf-8")
+    (outdir / "email.html").write_text("\n".join(html_parts), encoding="utf-8")
 
     print(f"[email] momentum charts: {len(mom_rows)} @ ~{IMG_W}x{IMG_H}px")
     print(f"[email] breakout charts: {len(brk_rows)} @ ~{IMG_W}x{IMG_H}px")
