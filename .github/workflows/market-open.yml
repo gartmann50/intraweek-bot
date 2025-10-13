@@ -348,118 +348,15 @@ jobs:
           NOTIONAL_PER:  "5000"   # per-name budget
         run: python tools/place_weekly_buys.py
 
-      - name: Seed stops for Day 1 (ATR 14 × 1.75)
+      - name: Ensure stops now (ATR14 × 1.75, GTC)
         if: ${{ steps.gate.outputs.go == '1' && (steps.buygate.outputs.do == '1' || github.event.inputs.force_buy == 'true') && steps.buylist.outputs.any == '1' }}
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
-          ALPACA_ENV:    paper   # flip to 'live' when ready
-        shell: bash
-        run: |
-          set -euo pipefail
-      
-          # 1) If we didn't buy anything, skip
-          if [[ ! -s backtests/buy_symbols.txt ]]; then
-            echo "No buy_symbols.txt or empty; skip seeding stops."
-            exit 0
-          fi
-      
-          # 2) Build a tiny picklist for the *bought* symbols (so stops only target new entries)
-          #    WEEK is already exported earlier in your workflow
-          awk -v wk="${WEEK}" 'BEGIN{print "symbol,week"} NF{print $0","wk}' \
-            backtests/buy_symbols.txt > backtests/_buylist_for_stops.csv
-          echo "[stops] using:"
-          cat backtests/_buylist_for_stops.csv
-      
-          # 3) Produce stops with the same logic you run after-close
-          python trailing_stops.py \
-            --data-dir stock_data_400 \
-            --picklist backtests/_buylist_for_stops.csv \
-            --week "${WEEK}" \
-            --monday "" \
-            --topk "999" \
-            --positions backtests/positions.json \
-            --method atr --atr-win 14 --atr-mult 1.75
-      
-          # 4) Push stops to Alpaca (create if none; tighten if better)
-          python - <<'PY'
-          import os, sys, requests, pandas as pd
-          BASE="https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
-          H={"APCA-API-KEY-ID":os.environ["ALPACA_KEY"],"APCA-API-SECRET-KEY":os.environ["ALPACA_SECRET"]}
-      
-          try:
-              df = pd.read_csv("backtests/stops.csv")
-          except Exception:
-              print("No backtests/stops.csv produced; nothing to apply.")
-              sys.exit(0)
-      
-          df.columns=[c.lower() for c in df.columns]
-          sym="symbol"
-          stop_col = "new_stop" if "new_stop" in df.columns else ("stop" if "stop" in df.columns else None)
-          if not stop_col:
-              print("No stop column found in stops.csv; exit.")
-              sys.exit(0)
-      
-          # Current positions & open stop orders
-          pos = requests.get(f"{BASE}/v2/positions", headers=H, timeout=20).json() or []
-          pos = {p["symbol"]:p for p in pos}
-          open_orders = requests.get(f"{BASE}/v2/orders", params={"status":"open","limit":500}, headers=H, timeout=20).json() or []
-          bysym={}
-          for od in open_orders:
-              if od.get("type") in ("stop","stop_limit"):
-                  bysym.setdefault(od.get("symbol"),[]).append(od)
-      
-          def better(curr,new,side):  # tighten-only
-              return new>curr if side=="long" else new<curr
-      
-          placed=0
-          for _,r in df.iterrows():
-              s=str(r[sym]).upper()
-              if s not in pos:
-                  continue
-              q = abs(float(pos[s]["qty"]))
-              side = "long" if float(pos[s]["qty"])>0 else "short"
-              try:
-                  ns = float(r[stop_col])
-              except Exception:
-                  continue
-      
-              curr, oid = None, None
-              for od in bysym.get(s,[]):
-                  try:
-                      curr = float(od.get("stop_price") or od.get("limit_price"))
-                      oid  = od.get("id")
-                      break
-                  except Exception:
-                      pass
-      
-              # If an order exists and the new stop isn't better, skip (tighten-only policy)
-              if curr is not None and not better(curr, ns, side):
-                  continue
-      
-              # Replace existing worse stop with a better one
-              if oid:
-                  try:
-                      requests.delete(f"{BASE}/v2/orders/{oid}", headers=H, timeout=20)
-                  except Exception:
-                      pass
-      
-              order = {
-                  "symbol": s,
-                  "qty": q,
-                  "side": "sell" if side=="long" else "buy",
-                  "type": "stop",
-                  "time_in_force": "day",
-                  "stop_price": ns
-              }
-              r = requests.post(f"{BASE}/v2/orders", headers=H, json=order, timeout=20)
-              if r.status_code in (200,201):
-                  placed += 1
-              else:
-                  print(f"[warn] stop place failed {s}: {r.status_code} {r.text}")
-      
-          print("seeded_or_tightened:", placed)
-          PY
+          ALPACA_ENV:    paper        # flip to 'live' when ready
+          ATR_WIN:       "14"
+          ATR_MULT:      "1.75"
+        run: python tools/ensure_stops.py
 
      
 
