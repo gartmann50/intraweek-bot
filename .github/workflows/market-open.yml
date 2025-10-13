@@ -339,57 +339,14 @@ jobs:
           print("WEEK =", week)
           open(os.environ['GITHUB_ENV'], 'a').write(f'WEEK={week}\n')
 
-      - name: Buy once (long-only)
+      - name: Buy once (weekly allow-list, safe notional)
         if: ${{ steps.gate.outputs.go == '1' && (steps.buygate.outputs.do == '1' || github.event.inputs.force_buy == 'true') && steps.buylist.outputs.any == '1' }}
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
           ALPACA_ENV:    paper
-          NOTIONAL_PER:  "5000"
-          TOPK:          ${{ env.TOPK || '6' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "NOTIONAL_PER=$NOTIONAL_PER"
-          echo "WEEK=$WEEK  TOPK=${TOPK}"
-      
-          # Gate to open (so DAY orders don’t get rejected)
-          python - <<'PY'
-          import os, sys, time, requests, datetime as dt
-          base = "https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
-          h = {"APCA-API-KEY-ID": os.environ["ALPACA_KEY"], "APCA-API-SECRET-KEY": os.environ["ALPACA_SECRET"]}
-          r = requests.get(f"{base}/v2/clock", headers=h, timeout=20)
-          c = r.json() if r.status_code==200 else {}
-          if c.get("is_open"): sys.exit(0)
-          nxt = c.get("next_open")
-          if not nxt: sys.exit(0)
-          t = dt.datetime.fromisoformat(nxt.replace("Z","+00:00"))
-          now = dt.datetime.now(dt.timezone.utc)
-          wait = (t-now).total_seconds()
-          if 0 < wait <= 7200:
-              print(f"Market closed; sleeping {int(wait)}s until open...")
-              time.sleep(int(wait))
-          PY
-      
-          # Build a synthetic picklist CSV from the filtered symbols
-          if [[ ! -s backtests/buy_symbols.txt ]]; then
-            echo "No symbols to buy"; exit 0
-          fi
-          awk -v wk="$WEEK" 'BEGIN{print "symbol,week"} NF{print $0","wk}' \
-            backtests/buy_symbols.txt > backtests/buylist.csv
-          echo "[buy] using picklist:"
-          cat backtests/buylist.csv
-      
-          # Call existing CLI that requires --picklist and --week
-          python execute_orders.py \
-            --broker alpaca \
-            --data-dir stock_data_400 \
-            --picklist backtests/buylist.csv \
-            --week "$WEEK" \
-            --topk 999 \
-            --side buy \
-            --notional "${NOTIONAL_PER}" \
-            --init-stop-atr-mult 1.75
+          NOTIONAL_PER:  "5000"   # per-name budget
+        run: python tools/place_weekly_buys.py
 
 
       - name: Show Alpaca positions (paper)
