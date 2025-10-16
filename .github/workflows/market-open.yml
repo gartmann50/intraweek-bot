@@ -345,8 +345,10 @@ jobs:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
           ALPACA_ENV:    paper
-          NOTIONAL_PER:  "5000"   # per-name budget
+          NOTIONAL_PER:  "5000"         # per-name budget
+          DATA_DIR:      stock_data_400 # <-- add this
         run: python tools/place_weekly_buys.py
+
 
       - name: Ensure stops now (ATR14 × 1.75, GTC)
         if: ${{ steps.gate.outputs.go == '1' && (steps.buygate.outputs.do == '1' || github.event.inputs.force_buy == 'true') && steps.buylist.outputs.any == '1' }}
