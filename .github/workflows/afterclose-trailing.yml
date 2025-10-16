@@ -209,3 +209,25 @@ jobs:
             backtests/stops.csv
             backtests/exit_symbols.txt
             backtests/trailing_report.txt
+
+      - name: Show open stop orders (Alpaca)
+        env:
+          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          ALPACA_ENV:    paper
+        shell: python
+        run: |
+          import os, requests
+          base = "https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
+          H={"APCA-API-KEY-ID":os.environ["ALPACA_KEY"],"APCA-API-SECRET-KEY":os.environ["ALPACA_SECRET"]}
+          r = requests.get(f"{base}/v2/orders", params={"status":"open","limit":200}, headers=H, timeout=20)
+          r.raise_for_status()
+          orders = r.json() or []
+          found = False
+          for od in orders:
+            if od.get("type") in ("stop","stop_limit"):
+              found = True
+              print(f"{od.get('symbol')}: {od.get('type')} stop_price={od.get('stop_price')} tif={od.get('time_in_force')} id={od.get('id')}")
+          if not found:
+            print("No open stop orders.")
+
