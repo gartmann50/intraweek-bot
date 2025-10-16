@@ -1,84 +1,35 @@
 #!/usr/bin/env python3
-import os, glob, math, datetime as dt, requests, pandas as pd
+import os, time, math, datetime as dt, requests, pandas as pd
 
-# ---------- Config ----------
+# --------- Config (env) ----------
 ALPACA_ENV   = os.getenv("ALPACA_ENV", "paper")
 BASE_TRADER  = "https://paper-api.alpaca.markets" if ALPACA_ENV.startswith("paper") else "https://api.alpaca.markets"
-BASE_DATA    = "https://data.alpaca.markets"
-FEED         = os.getenv("ALPACA_DATA_FEED", "iex")  # 'iex' for paper, 'sip' for live
-DATA_DIR     = os.getenv("DATA_DIR", "stock_data_400")
-ATR_WIN      = int(float(os.getenv("ATR_WIN", "14")))
+POLY_KEY     = os.environ["POLYGON_API_KEY"]  # must be set
+ATR_WIN      = int(float(os.getenv("ATR_WIN",  "14")))
 ATR_MULT     = float(os.getenv("ATR_MULT", "1.75"))
-LOOKBACK_CAL = int(os.getenv("LOOKBACK_CAL_DAYS", "210"))   # calendar days for start window
-POLY_KEY     = os.getenv("POLYGON_API_KEY", "")
+LOOKBACK_D   = int(os.getenv("LOOKBACK_CAL_DAYS", "240"))  # calendar days for bars
+RATE_SLEEP_S = float(os.getenv("POLY_SLEEP_SEC", "0.15"))  # small delay to respect rate limits
 
-H = {
+H_TRADE = {
     "APCA-API-KEY-ID": os.environ["ALPACA_KEY"],
     "APCA-API-SECRET-KEY": os.environ["ALPACA_SECRET"],
 }
 
-# ---------- Helpers ----------
+# --------- Helpers ----------
 def now_utc():
     return dt.datetime.now(dt.timezone.utc)
 
-def start_iso(days: int) -> str:
-    return (now_utc() - dt.timedelta(days=days)).isoformat()
-
-def local_last_close_and_atr(sym: str):
-    files = sorted(glob.glob(os.path.join(DATA_DIR, f"{sym}*.csv")))
-    for f in files[::-1]:
-        try:
-            df = pd.read_csv(f, usecols=[0,1,2,3,4])
-            df = df.rename(columns={"Date":"date","Open":"open","High":"high","Low":"low","Close":"close"})
-            if len(df) >= ATR_WIN + 2:
-                return last_close_and_atr_from_df(df)
-        except Exception:
-            pass
-    return None, None, "no_local_csv"
-
-def alpaca_bars(sym: str, limit: int = 1000):
-    """Alpaca v2 bars with explicit start window."""
-    url = f"{BASE_DATA}/v2/stocks/{sym}/bars"
-    params = {
-        "timeframe": "1Day",
-        "limit":     limit,
-        "feed":      FEED,
-        "adjustment":"all",
-        "start":     start_iso(LOOKBACK_CAL),   # <- important!
-    }
-    r = requests.get(url, headers=H, params=params, timeout=25)
-    if r.status_code != 200:
-        return None, f"http_{r.status_code}"
-    j = r.json() or {}
-    bars = j.get("bars", [])
-    if not bars:
-        return None, "empty"
-    df = pd.DataFrame([{
-        "date":  b.get("t"),
-        "open":  b.get("o"),
-        "high":  b.get("h"),
-        "low":   b.get("l"),
-        "close": b.get("c"),
-        "vol":   b.get("v")
-    } for b in bars])
-    for c in ("open","high","low","close"):
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    return df, None
-
-def polygon_bars(sym: str, limit: int = 1000):
-    """Optional fallback to Polygon aggregates (1D)."""
-    if not POLY_KEY:
-        return None, "no_polygon_key"
-    # 240 calendar days back to be safe
-    start = (now_utc() - dt.timedelta(days=240)).date().isoformat()
+def polygon_bars(sym: str):
+    """Fetch daily bars from Polygon (adjusted, asc)"""
+    start = (now_utc() - dt.timedelta(days=LOOKBACK_D)).date().isoformat()
     end   = now_utc().date().isoformat()
     url = f"https://api.polygon.io/v2/aggs/ticker/{sym}/range/1/day/{start}/{end}"
     params = {"adjusted":"true", "sort":"asc", "limit":"50000", "apiKey": POLY_KEY}
     r = requests.get(url, params=params, timeout=25)
     if r.status_code != 200:
         return None, f"poly_http_{r.status_code}"
-    j = r.json() or {}
-    rows = j.get("results", [])
+    js = r.json() or {}
+    rows = js.get("results") or []
     if not rows:
         return None, "poly_empty"
     df = pd.DataFrame([{
@@ -86,15 +37,15 @@ def polygon_bars(sym: str, limit: int = 1000):
         "open":  x.get("o"),
         "high":  x.get("h"),
         "low":   x.get("l"),
-        "close": x.get("c")
+        "close": x.get("c"),
     } for x in rows])
     for c in ("open","high","low","close"):
         df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = df.dropna(subset=["open","high","low","close"])
     return df, None
 
-def last_close_and_atr_from_df(df: pd.DataFrame):
-    df = df.dropna(subset=["open","high","low","close"]).copy()
-    if len(df) < ATR_WIN + 2:
+def last_close_and_atr(df: pd.DataFrame, win: int):
+    if df is None or len(df) < win + 2:
         return None, None, "too_few_bars"
     prev_close = df["close"].shift(1)
     tr = pd.concat([
@@ -102,33 +53,14 @@ def last_close_and_atr_from_df(df: pd.DataFrame):
         (df["high"] - prev_close).abs(),
         (df["low"]  - prev_close).abs(),
     ], axis=1).max(axis=1)
-    atr = tr.rolling(ATR_WIN, min_periods=ATR_WIN).mean().iloc[-1]
+    atr = tr.rolling(win, min_periods=win).mean().iloc[-1]
     last_close = float(df["close"].iloc[-1])
     if not (pd.notna(atr) and pd.notna(last_close)):
         return None, None, "nan"
     return float(last_close), float(atr), None
 
-def last_close_and_atr(sym: str):
-    lc, atr, reason = local_last_close_and_atr(sym)
-    if lc is not None and atr is not None:
-        return lc, atr, "local_csv"
-    df, err = alpaca_bars(sym)
-    if df is not None:
-        lc, atr, reason2 = last_close_and_atr_from_df(df)
-        if lc is not None:
-            return lc, atr, "alpaca"
-        return None, None, reason2 or "alp_err"
-    # optional fallback to Polygon
-    df, err2 = polygon_bars(sym)
-    if df is not None:
-        lc, atr, reason2 = last_close_and_atr_from_df(df)
-        if lc is not None:
-            return lc, atr, "polygon"
-        return None, None, reason2 or "poly_err"
-    return None, None, f"no_data({err}|{err2})"
-
 def current_positions():
-    r = requests.get(f"{BASE_TRADER}/v2/positions", headers=H, timeout=20)
+    r = requests.get(f"{BASE_TRADER}/v2/positions", headers=H_TRADE, timeout=20)
     r.raise_for_status()
     out = {}
     for p in r.json() or []:
@@ -139,15 +71,16 @@ def current_positions():
 
 def open_stop_orders_by_symbol():
     r = requests.get(f"{BASE_TRADER}/v2/orders",
-                     params={"status":"open","limit":500}, headers=H, timeout=20)
+                     params={"status":"open","limit":500},
+                     headers=H_TRADE, timeout=20)
     r.raise_for_status()
     by = {}
     for od in r.json() or []:
         if od.get("type") in ("stop","stop_limit"):
-            by.setdefault(od.get("symbol"), []).append(od)
+            by.setdefault(od.get("symbol"),[]).append(od)
     return by
 
-def better(curr, new, side):  # tighten?
+def better(curr, new, side):
     return new > curr if side == "long" else new < curr
 
 def ensure_stop(sym, side, qty, last_close, atr, existing):
@@ -158,7 +91,6 @@ def ensure_stop(sym, side, qty, last_close, atr, existing):
         ns = last_close + ATR_MULT * atr
         stop_side = "buy"
 
-    # inspect existing stop
     curr, oid = None, None
     for od in existing.get(sym, []):
         try:
@@ -170,65 +102,63 @@ def ensure_stop(sym, side, qty, last_close, atr, existing):
             curr, oid = sp, od.get("id")
             break
 
-    # (re)place if better
     if curr is None or better(curr, ns, side):
         if oid:
-            requests.delete(f"{BASE_TRADER}/v2/orders/{oid}", headers=H, timeout=20)
+            requests.delete(f"{BASE_TRADER}/v2/orders/{oid}", headers=H_TRADE, timeout=20)
         payload = {
             "symbol": sym,
             "qty": abs(float(qty)),
             "side": stop_side,
             "type": "stop",
-            "time_in_force": "gtc",     # persist across days
+            "time_in_force": "gtc",
             "stop_price": round(ns, 4),
         }
-        r = requests.post(f"{BASE_TRADER}/v2/orders", headers=H, json=payload, timeout=25)
+        r = requests.post(f"{BASE_TRADER}/v2/orders", headers=H_TRADE, json=payload, timeout=25)
         if r.status_code in (200, 201):
             print(f"[{'placed' if curr is None else 'tightened'}] {sym} stop={payload['stop_price']} side={stop_side} tif=gtc")
             return True
-        else:
-            print(f"[WARN] stop place fail {sym}: {r.status_code} {r.text}")
-            return False
+        print(f"[WARN] place fail {sym}: {r.status_code} {r.text}")
+        return False
     else:
         print(f"[keep ] {sym} existing_stop={curr}")
         return True
 
-# ---------- Main ----------
+# --------- Main ----------
 def main():
     pos = current_positions()
     if not pos:
         print("No open positions; nothing to do.")
         return
-    print("[stops] target symbols:", sorted(pos.keys()))
-
+    print("[stops] symbols:", sorted(pos.keys()))
     existing = open_stop_orders_by_symbol()
 
     placed = skipped = failed = 0
-    for sym, info in sorted(pos.items()):
-        qty  = info["qty"]
-        side = info["side"]
+    for i, (sym, info) in enumerate(sorted(pos.items())):
+        # light rate control for Polygon free tier (~5 req/s); we call ≤ positions
+        if i: time.sleep(RATE_SLEEP_S)
+
+        qty  = info["qty"]; side = info["side"]
         if qty == 0:
-            print(f"- {sym}: qty=0; skip.")
-            skipped += 1
-            continue
+            print(f"- {sym}: qty=0; skip."); skipped += 1; continue
 
-        lc, atr, src = last_close_and_atr(sym)
-        if lc is None or atr is None:
-            print(f"- {sym}: no bars; skip. (src={src})")
-            skipped += 1
-            continue
+        df, perr = polygon_bars(sym)
+        if df is None:
+            print(f"- {sym}: polygon {perr}; skip."); skipped += 1; continue
 
-        ok = False
+        lc, atr, aerr = last_close_and_atr(df, ATR_WIN)
+        if lc is None:
+            print(f"- {sym}: {aerr}; skip."); skipped += 1; continue
+
         try:
             ok = ensure_stop(sym, side, qty, lc, atr, existing)
         except Exception as e:
             print(f"[ERROR] {sym}: {e}")
-        if ok:
-            placed += 1
-        else:
-            failed += 1
+            ok = False
 
-    print(f"[stops] summary: {{\"placed\": {placed}, \"skipped\": {skipped}, \"failed\": {failed}}}")
+        if ok: placed += 1
+        else:  failed  += 1
+
+    print(f"[stops] summary: placed={placed}, skipped={skipped}, failed={failed}")
 
 if __name__ == "__main__":
     main()
