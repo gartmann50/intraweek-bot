@@ -151,13 +151,15 @@ jobs:
       # --- Seed or tighten stops for all open positions (ATR14 × 1.75) ---
       - name: Ensure stops now (seed or tighten) — ATR14 × 1.75, GTC
         env:
-          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
-          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
-          ALPACA_ENV:    paper          # change to 'live' when ready
-          ATR_WIN:       "14"
-          ATR_MULT:      "1.75"
-          ALLOW_ALL_POS: "true"         # true = operate on ALL open positions
+          ALPACA_KEY:      ${{ secrets.ALPACA_KEY }}
+          ALPACA_SECRET:   ${{ secrets.ALPACA_SECRET }}
+          ALPACA_ENV:      paper
+          ALPACA_DATA_FEED: iex           # <- add this (iex on paper; sip on live if you have it)
+          DATA_DIR:        stock_data_400  # where your local CSVs live
+          ATR_WIN:         "14"
+          ATR_MULT:        "1.75"
         run: python tools/ensure_stops.py
+
 
      
       - uses: actions/upload-artifact@v4
