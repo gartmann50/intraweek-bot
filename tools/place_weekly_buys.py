@@ -1,160 +1,187 @@
 #!/usr/bin/env python3
 """
-Place weekly buys using ONLY whole shares.
+Place weekly buy orders using whole shares only.
 
-Inputs (via env + files):
-- ENV:
-    ALPACA_KEY, ALPACA_SECRET, ALPACA_ENV  (paper|live)
-    NOTIONAL_PER  (e.g. "5000")
-    WEEK          (YYYY-MM-DD, exported earlier in the job)
-- Files:
-    backtests/buy_symbols.txt   # one symbol per line
-    stock_data_400/             # cached EOD CSVs (used to fetch last close)
+Price source fallback chain (first that works wins):
+  1) Alpaca latest trade (/v2/stocks/{sym}/trades/latest) -> price
+  2) Alpaca latest quote (/v2/stocks/{sym}/quotes/latest) -> (bid+ask)/2
+  3) Local CSV in DATA_DIR (last close)
 
-Behavior:
-- For each symbol, get last close from cache (fallback to Alpaca last trade).
-- qty = floor(NOTIONAL_PER / last_price). If qty < 1 -> skip.
-- Market DAY order with explicit qty (no notional param => whole shares only).
-- Writes backtests/buy_exec_report.csv for audit.
+Requires env:
+  ALPACA_KEY, ALPACA_SECRET, ALPACA_ENV in {paper,live}
+  NOTIONAL_PER  (e.g. "5000")
+Optional:
+  DATA_DIR (default: stock_data_400)
+Inputs:
+  backtests/buy_symbols.txt  (one symbol per line)
+Outputs:
+  backtests/buy_exec_report.csv
 """
-from __future__ import annotations
 
-import os, sys, math, glob, time, json
-import pathlib as p
+import os, sys, json, glob, math, time
+from typing import Optional, Tuple, List
 import requests
 import pandas as pd
+from pathlib import Path
 
-ALPACA_ENV = os.getenv("ALPACA_ENV", "paper").strip().lower()
-BASE = "https://paper-api.alpaca.markets" if ALPACA_ENV.startswith("paper") else "https://api.alpaca.markets"
-H = {
-    "APCA-API-KEY-ID":     os.environ.get("ALPACA_KEY", ""),
-    "APCA-API-SECRET-KEY": os.environ.get("ALPACA_SECRET", ""),
+TRADING_PAPER = "https://paper-api.alpaca.markets"
+TRADING_LIVE  = "https://api.alpaca.markets"
+DATA_BASE     = "https://data.alpaca.markets/v2"
+
+ALPACA_KEY    = os.environ.get("ALPACA_KEY", "")
+ALPACA_SECRET = os.environ.get("ALPACA_SECRET", "")
+ALPACA_ENV    = os.environ.get("ALPACA_ENV", "paper").lower()
+NOTIONAL_PER  = float(os.environ.get("NOTIONAL_PER", "0") or "0")
+DATA_DIR      = os.environ.get("DATA_DIR", "stock_data_400")
+
+HEADERS = {
+    "APCA-API-KEY-ID": ALPACA_KEY,
+    "APCA-API-SECRET-KEY": ALPACA_SECRET,
 }
-DATA_DIR = p.Path("stock_data_400")
-BUY_FILE = p.Path("backtests/buy_symbols.txt")
-REPORT = p.Path("backtests/buy_exec_report.csv")
 
-def die(msg, code=1):
-    print(f"ERROR: {msg}", file=sys.stderr)
-    sys.exit(code)
+def trading_base() -> str:
+    return TRADING_PAPER if ALPACA_ENV.startswith("paper") else TRADING_LIVE
 
-def last_close_from_cache(sym: str) -> float | None:
-    """Return last close from our cached CSVs, or None."""
-    if not DATA_DIR.exists():
-        return None
-    paths = sorted(glob.glob(str(DATA_DIR / f"{sym}*.csv")))
-    for path in paths:
-        try:
-            df = pd.read_csv(path, usecols=[0,4])  # Date, Close
-            if len(df):
-                return float(df.iloc[-1, 1])
-        except Exception:
-            pass
-    return None
+def read_buy_symbols(path="backtests/buy_symbols.txt") -> List[str]:
+    p = Path(path)
+    if not p.exists():
+        print(f"[buy] no list found at {p} -> nothing to do")
+        return []
+    syms = []
+    for line in p.read_text().splitlines():
+        s = line.strip().upper()
+        if s:
+            syms.append(s)
+    return syms
 
-def last_trade_from_alpaca(sym: str) -> float | None:
-    """Fallback: last trade from Alpaca data API (works for paper/live if allowed)."""
+def alpaca_latest_trade(sym: str) -> Optional[float]:
     try:
-        r = requests.get(f"{BASE}/v2/stocks/{sym}/trades/latest", headers=H, timeout=10)
+        r = requests.get(f"{DATA_BASE}/stocks/{sym}/trades/latest", headers=HEADERS, timeout=15)
         if r.status_code == 200:
             j = r.json() or {}
-            t = j.get("trade") or {}
-            px = t.get("p")
-            return float(px) if px is not None else None
-    except Exception:
-        pass
+            # v2 format: {"symbol":"AAPL","trade":{"p": 123.45, ...}}
+            t = (j.get("trade") or {})
+            p = t.get("p")
+            if isinstance(p, (int, float)) and p > 0:
+                return float(p)
+    except Exception as e:
+        print(f"[price] trade err {sym}: {e}")
     return None
 
-def money(s: float | int) -> str:
-    return f"${s:,.2f}"
-
-def place_market_day(sym: str, qty: int) -> dict:
-    """Place a market DAY order with whole-share qty."""
-    payload = {
-        "symbol": sym,
-        "qty": qty,
-        "side": "buy",
-        "type": "market",
-        "time_in_force": "day",
-    }
-    r = requests.post(f"{BASE}/v2/orders", headers=H, json=payload, timeout=15)
+def alpaca_latest_quote_mid(sym: str) -> Optional[float]:
     try:
-        r.raise_for_status()
-        return r.json() or {}
+        r = requests.get(f"{DATA_BASE}/stocks/{sym}/quotes/latest", headers=HEADERS, timeout=15)
+        if r.status_code == 200:
+            j = r.json() or {}
+            # v2 format: {"symbol":"AAPL","quote":{"bp":..., "ap":...}}
+            q = (j.get("quote") or {})
+            bp, ap = q.get("bp"), q.get("ap")
+            if isinstance(bp, (int, float)) and isinstance(ap, (int, float)) and ap > 0:
+                return (float(bp) + float(ap)) / 2.0
     except Exception as e:
-        try:
-            print(f"[order] FAIL {sym} x{qty} -> {r.status_code} {r.text}")
-        except Exception:
-            print(f"[order] FAIL {sym} x{qty} -> {e}")
-        return {"error": str(e), "status": r.status_code, "body": r.text}
+        print(f"[price] quote err {sym}: {e}")
+    return None
+
+def local_last_close(sym: str) -> Optional[float]:
+    try:
+        files = sorted(glob.glob(f"{DATA_DIR}/{sym}*.csv"))
+        for fp in files:
+            try:
+                df = pd.read_csv(fp, usecols=[0,4])  # Date, Close
+                if len(df):
+                    v = float(df.iloc[-1,1])
+                    if v > 0:
+                        return v
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"[price] local err {sym}: {e}")
+    return None
+
+def resolve_price(sym: str) -> Optional[float]:
+    for fn in (alpaca_latest_trade, alpaca_latest_quote_mid, local_last_close):
+        p = fn(sym)
+        if p and p > 0:
+            return float(p)
+    return None
+
+def asset_meta(sym: str) -> Tuple[bool,bool]:
+    """tradable, fractionable (we only buy whole shares, but useful to log)"""
+    try:
+        r = requests.get(f"{trading_base()}/v2/assets/{sym}", headers=HEADERS, timeout=15)
+        if r.status_code == 200:
+            j = r.json() or {}
+            return bool(j.get("tradable", False)), bool(j.get("fractionable", False))
+    except Exception:
+        pass
+    return False, False
+
+def place_market_buy(sym: str, qty: int) -> Tuple[bool,str]:
+    try:
+        o = {
+            "symbol": sym,
+            "qty": qty,
+            "side": "buy",
+            "type": "market",
+            "time_in_force": "day"
+        }
+        r = requests.post(f"{trading_base()}/v2/orders", headers=HEADERS, json=o, timeout=20)
+        if r.status_code in (200, 201):
+            oid = (r.json() or {}).get("id", "")
+            print(f"[buy] placed {sym} qty={qty} id={oid}")
+            return True, oid
+        else:
+            print(f"[buy] FAIL {sym} qty={qty} code={r.status_code} msg={r.text[:300]}")
+    except Exception as e:
+        print(f"[buy] EXC {sym} qty={qty}: {e}")
+    return False, ""
 
 def main():
-    # Sanity
-    if not H["APCA-API-KEY-ID"] or not H["APCA-API-SECRET-KEY"]:
-        die("Missing ALPACA_KEY/ALPACA_SECRET in env.")
-    try:
-        notional = float(os.getenv("NOTIONAL_PER", "0").replace(",","").strip() or 0)
-    except Exception:
-        die("Invalid NOTIONAL_PER (must be number).")
-    if notional <= 0:
-        die("NOTIONAL_PER must be > 0.")
-    week = os.getenv("WEEK", "").strip()
-    if not week:
-        print("[warn] WEEK not set; proceeding anyway.")
+    if not (ALPACA_KEY and ALPACA_SECRET):
+        print("Missing ALPACA_KEY/ALPACA_SECRET"); sys.exit(1)
+    if NOTIONAL_PER <= 0:
+        print("NOTIONAL_PER must be > 0"); sys.exit(1)
 
-    if not BUY_FILE.exists():
-        print("[buy] no buy_symbols.txt → nothing to buy.")
-        return
-
-    syms = [s.strip().upper() for s in BUY_FILE.read_text().splitlines() if s.strip()]
-    if not syms:
-        print("[buy] empty buy_symbols.txt → nothing to buy.")
+    Path("backtests").mkdir(exist_ok=True)
+    symbols = read_buy_symbols()
+    if not symbols:
+        print("[buy] no symbols to buy; exit 0")
         return
 
     rows = []
     placed = 0
-    skipped = 0
-    for sym in syms:
-        # 1) Fetch a price
-        px = last_close_from_cache(sym)
-        src = "cache"
-        if px is None:
-            px = last_trade_from_alpaca(sym)
-            src = "alpaca" if px is not None else "none"
-
-        if px is None or px <= 0:
-            print(f"[buy] {sym}: no price → skip.")
-            rows.append({"symbol": sym, "price": "", "src": src, "qty": 0, "status": "skip_no_price"})
-            skipped += 1
+    for s in symbols:
+        price = resolve_price(s)
+        if not price or price <= 0:
+            print(f"[buy] {s}: no price -> skip.")
+            rows.append({"symbol": s, "status": "skip_no_price"})
             continue
 
-        # 2) Whole-share qty
-        qty = int(math.floor(notional / px))
+        tradable, fractionable = asset_meta(s)
+        if not tradable:
+            print(f"[buy] {s}: not tradable -> skip.")
+            rows.append({"symbol": s, "status": "skip_not_tradable", "price": price})
+            continue
+
+        qty = int(math.floor(NOTIONAL_PER / price))
         if qty < 1:
-            print(f"[buy] {sym}: price {money(px)} > budget {money(notional)} → skip.")
-            rows.append({"symbol": sym, "price": px, "src": src, "qty": 0, "status": "skip_too_expensive"})
-            skipped += 1
+            print(f"[buy] {s}: floor({NOTIONAL_PER}/{price:.2f}) < 1 -> skip.")
+            rows.append({"symbol": s, "status": "skip_small_budget", "price": price})
             continue
 
-        print(f"[buy] {sym}: price {money(px)} (src={src}) notional {money(notional)} ⇒ qty {qty}")
-        od = place_market_day(sym, qty)
-        status = "ok" if od and od.get("id") else "fail"
-        if status == "ok":
-            placed += 1
+        ok, oid = place_market_buy(s, qty)
         rows.append({
-            "symbol": sym,
-            "price": px,
-            "src": src,
-            "qty": qty,
-            "status": status,
-            "order_id": (od or {}).get("id", ""),
+            "symbol": s, "status": "placed" if ok else "failed",
+            "price_used": price, "qty": qty, "order_id": oid,
+            "fractionable": fractionable
         })
-        time.sleep(0.3)  # gentle rate
+        if ok: placed += 1
+        time.sleep(0.2)  # be polite
 
-    # Write report
-    p.Path("backtests").mkdir(exist_ok=True)
-    pd.DataFrame(rows).to_csv(REPORT, index=False)
-    print(f"[buy] placed={placed}, skipped={skipped}. report: {REPORT}")
+    df = pd.DataFrame(rows)
+    df.to_csv("backtests/buy_exec_report.csv", index=False)
+    print(f"[buy] placed={placed}, skipped={len(symbols)-placed}")
+    print(f"[buy] report: backtests/buy_exec_report.csv")
 
 if __name__ == "__main__":
     main()
