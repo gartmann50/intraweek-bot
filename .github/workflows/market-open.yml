@@ -132,7 +132,7 @@ jobs:
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
-          ALPACA_ENV:    paper
+          ALPACA_ENV:    live
           FORCE_BUY:     ${{ github.event.inputs.force_buy }}
         shell: python
         run: |
@@ -153,7 +153,7 @@ jobs:
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
-          ALPACA_ENV:    paper
+          ALPACA_ENV:    live
         run: |
           if [ -s backtests/exit_symbols.txt ]; then
             python execute_orders.py \
@@ -171,7 +171,7 @@ jobs:
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
-          ALPACA_ENV:    paper
+          ALPACA_ENV:    live
           FORCE_BUY:     ${{ github.event.inputs.force_buy }}   # <-- add this
         shell: python
         run: |
@@ -203,7 +203,7 @@ jobs:
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
-          ALPACA_ENV:    paper
+          ALPACA_ENV:    live
           TOPK:          ${{ env.TOPK || '6' }}
         shell: python
         run: |
@@ -258,7 +258,7 @@ jobs:
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
-          ALPACA_ENV:    paper
+          ALPACA_ENV:    live
           NOTIONAL_PER:  "5000"
           TOPK:          ${{ env.TOPK || '6' }}
         shell: python
@@ -344,7 +344,7 @@ jobs:
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
-          ALPACA_ENV:    paper
+          ALPACA_ENV:    live
           NOTIONAL_PER:  "5000"         # per-name budget
           DATA_DIR:      stock_data_400 # <-- add this
         run: python tools/place_weekly_buys.py
