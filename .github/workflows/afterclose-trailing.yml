@@ -66,7 +66,7 @@ jobs:
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
-          ALPACA_ENV:    paper
+          ALPACA_ENV:    live
         shell: python
         run: |
           import os, time, requests, datetime as dt
@@ -154,7 +154,7 @@ jobs:
           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
           ALPACA_KEY:      ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET:   ${{ secrets.ALPACA_SECRET }}
-          ALPACA_ENV:      paper        # or 'live'
+          ALPACA_ENV:      live        # or 'live'
           ATR_WIN:         "14"
           ATR_MULT:        "1.75"
           LOOKBACK_CAL_DAYS: "240"
@@ -176,7 +176,7 @@ jobs:
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
-          ALPACA_ENV:    paper
+          ALPACA_ENV:    live
         shell: python
         run: |
           import os, requests
