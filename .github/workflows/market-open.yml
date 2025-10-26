@@ -355,7 +355,7 @@ jobs:
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
-          ALPACA_ENV:    paper        # flip to 'live' when ready
+          ALPACA_ENV:    live        # flip to 'live' when ready
           ATR_WIN:       "14"
           ATR_MULT:      "1.75"
         run: python tools/ensure_stops.py
@@ -366,6 +366,7 @@ jobs:
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
+          ALPACA_ENV:    live
         run: python tools/moc_flatten.py
 
       # Mark as opened so this week won't buy again
