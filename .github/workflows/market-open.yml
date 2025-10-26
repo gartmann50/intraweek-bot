@@ -371,4 +371,5 @@ jobs:
 
       # Mark as opened so this week won't buy again
       - name: Mark opened
+        if: ${{ steps.gate.outputs.go == '1' && (steps.buygate.outputs.do == '1' || github.event.inputs.force_buy == 'true') && steps.buylist.outputs.any == '1' }}
         run: mkdir -p .open-flag && date > .open-flag/ok
