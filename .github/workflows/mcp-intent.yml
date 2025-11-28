@@ -20,8 +20,6 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          # or, if you keep tools isolated:
-          # pip install -r tools/requirements.txt
 
       - name: Write MCP payload to file
         run: |
@@ -31,11 +29,18 @@ jobs:
 
       - name: Run MCP Intent Runner
         env:
-          # Broker / infra secrets here
-          IB_HOST: ${{ secrets.IB_HOST }}
-          IB_PORT: ${{ secrets.IB_PORT }}
-          IB_CLIENT_ID: ${{ secrets.IB_CLIENT_ID }}
-          TRADING_ENV: "PROD"  # or "PAPER"
+          # ---- Alpaca (from GitHub Secrets) ----
+          ALPACA_API_KEY: ${{ secrets.ALPACA_API_KEY }}
+          ALPACA_API_SECRET: ${{ secrets.ALPACA_API_SECRET }}
+          # Paper trading URL by default; change if you go live
+          ALPACA_BASE_URL: ${{ secrets.ALPACA_BASE_URL }}
+
+          # ---- Polygon (from GitHub Secrets) ----
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+
+          # ---- Safety toggle ----
+          # "PAPER" for testing, "PROD" when you're ready for live trades
+          TRADING_ENV: ${{ secrets.TRADING_ENV }}
         run: |
           python tools/mcp_intent_runner.py \
             --payload-file mcp_payload.json
