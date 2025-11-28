@@ -31,9 +31,9 @@ def test_environment_variables():
     print("="*60)
     
     required_vars = [
-        "ALPACA_API_KEY",
-        "ALPACA_SECRET_KEY",
-        "POLYGON_API_KEY"
+        ("ALPACA_API_KEY", ["ALPACA_API_KEY", "ALPACA_API_KEY_ID"]),
+        ("ALPACA_SECRET_KEY", ["ALPACA_SECRET_KEY", "ALPACA_API_SECRET_KEY"]),
+        ("POLYGON_API_KEY", ["POLYGON_API_KEY"])
     ]
     
     optional_vars = [
@@ -45,11 +45,15 @@ def test_environment_variables():
     
     all_good = True
     
-    for var in required_vars:
-        if os.getenv(var):
-            success(f"{var} is set")
-        else:
-            error(f"{var} is NOT set (required)")
+    for display_name, var_options in required_vars:
+        found = False
+        for var in var_options:
+            if os.getenv(var):
+                success(f"{display_name} is set (as {var})")
+                found = True
+                break
+        if not found:
+            error(f"{display_name} is NOT set (tried: {', '.join(var_options)})")
             all_good = False
     
     for var in optional_vars:
@@ -69,9 +73,13 @@ def test_alpaca_connection():
     try:
         import alpaca_trade_api as tradeapi
         
+        # Try both possible variable names
+        api_key = os.getenv("ALPACA_API_KEY") or os.getenv("ALPACA_API_KEY_ID")
+        api_secret = os.getenv("ALPACA_SECRET_KEY") or os.getenv("ALPACA_API_SECRET_KEY")
+        
         api = tradeapi.REST(
-            os.getenv("ALPACA_API_KEY"),
-            os.getenv("ALPACA_SECRET_KEY"),
+            api_key,
+            api_secret,
             os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
         )
         
