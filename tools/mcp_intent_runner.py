@@ -1,300 +1,334 @@
 #!/usr/bin/env python3
 """
-MCP Intent Runner
-
-Reads an intent JSON file (from GitHub repository_dispatch),
-validates it, uses Alpaca for prices + orders, and performs
-some basic safety checks (env, market hours).
-
-Polygon is NOT used here (you can still use it elsewhere in your app).
+MCP Intent Runner - GitHub Actions Compatible
+Processes trading intents from Claude mobile or GitHub webhook
 """
 
-import argparse
-import json
 import os
 import sys
-from dataclasses import dataclass
-from typing import Optional, Literal
+import json
+import logging
+from datetime import datetime
+from typing import Dict, List, Optional
 
 import alpaca_trade_api as tradeapi
+from polygon import RESTClient as PolygonClient
 
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
-# --------- Types ---------
+# Initialize APIs - matching your GitHub secret names
+ALPACA_KEY = os.getenv("ALPACA_API_KEY") or os.getenv("ALPACA_API_KEY_ID")
+ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY") or os.getenv("ALPACA_API_SECRET_KEY")
+ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
+POLYGON_KEY = os.getenv("POLYGON_API_KEY")
 
-IntentType = Literal["buy", "close", "close_all"]
+alpaca = tradeapi.REST(ALPACA_KEY, ALPACA_SECRET, ALPACA_BASE_URL, api_version='v2')
+polygon = PolygonClient(POLYGON_KEY)
 
+# Safety configuration
+MAX_POSITION_SIZE = int(os.getenv("MAX_POSITION_SIZE", "1000"))
+MAX_POSITION_VALUE = float(os.getenv("MAX_POSITION_VALUE", "10000"))
+UNIVERSE_FILE = os.getenv("UNIVERSE_FILE", "data/universe_liquid.txt")
 
-@dataclass
-class MCPIntent:
-    intent: IntentType
-    symbol: Optional[str] = None
-    quantity: Optional[float] = None
-    notional: Optional[float] = None
-    side: str = "BUY"
-    time_in_force: str = "DAY"
-    dry_run: bool = True
-    comment: Optional[str] = None
-    meta: dict | None = None
-
-
-# --------- Logging helper ---------
-
-def log(msg: str) -> None:
-    print(msg, flush=True)
-
-
-# --------- Env helpers ---------
-
-def get_env(name: str, required: bool = True, default: Optional[str] = None) -> Optional[str]:
-    value = os.getenv(name, default)
-    if required and not value:
-        raise RuntimeError(f"Missing required environment variable: {name}")
-    return value
-
-
-# --------- Alpaca client ---------
-
-_alpaca_client: Optional[tradeapi.REST] = None
-
-
-def get_alpaca_client() -> tradeapi.REST:
-    """Create (or reuse) an Alpaca REST client."""
-    global _alpaca_client
-    if _alpaca_client is None:
-        api_key = get_env("ALPACA_API_KEY")
-        api_secret = get_env("ALPACA_API_SECRET")
-        base_url = get_env("ALPACA_BASE_URL")
-        log(f"Connecting to Alpaca at {base_url}")
-        _alpaca_client = tradeapi.REST(
-            key_id=api_key,
-            secret_key=api_secret,
-            base_url=base_url,
-        )
-    return _alpaca_client
-
-
-def get_alpaca_last_price(symbol: str) -> Optional[float]:
-    """
-    Get the latest trade price for a symbol from Alpaca.
-    If anything fails, returns None instead of crashing.
-    """
+def load_universe() -> set:
+    """Load allowed trading universe"""
     try:
-        api = get_alpaca_client()
-        trade = api.get_latest_trade(symbol)
-        price = float(trade.price)
-        log(f"Alpaca latest trade for {symbol}: {price}")
-        return price
-    except Exception as e:
-        log(f"WARNING: Could not fetch Alpaca last price for {symbol}: {e}")
-        return None
+        with open(UNIVERSE_FILE, 'r') as f:
+            return set(line.strip().upper() for line in f if line.strip())
+    except FileNotFoundError:
+        logger.warning(f"Universe file not found: {UNIVERSE_FILE}")
+        return set()
 
+ALLOWED_SYMBOLS = load_universe()
+logger.info(f"Loaded {len(ALLOWED_SYMBOLS)} symbols from universe")
 
-# --------- Load + validate intent ---------
-
-def load_intent_from_file(path: str) -> MCPIntent:
-    log(f"Loading MCP intent from {path}")
-    with open(path, "r", encoding="utf-8") as f:
-        raw = json.load(f)
-
-    def get(key, default=None):
-        return raw.get(key, default)
-
-    intent = get("intent")
-    if intent not in ("buy", "close", "close_all"):
-        raise ValueError(f"Unsupported intent: {intent}")
-
-    symbol = get("symbol")
-    if intent in ("buy", "close") and not symbol:
-        raise ValueError(f"Intent '{intent}' requires 'symbol'")
-
-    quantity = get("quantity")
-    notional = get("notional")
-
-    if intent == "buy" and not (quantity or notional):
-        raise ValueError("Buy intent requires 'quantity' or 'notional'")
-
-    dry_run = bool(get("dry_run", True))
-
-    return MCPIntent(
-        intent=intent,
-        symbol=symbol,
-        quantity=quantity,
-        notional=notional,
-        side=get("side", "BUY").upper(),
-        time_in_force=get("time_in_force", "DAY").upper(),
-        dry_run=dry_run,
-        comment=get("comment"),
-        meta=get("meta", {}),
-    )
-
-
-# --------- Safety checks ---------
-
-def ensure_live_allowed(intent: MCPIntent) -> None:
-    """
-    Block LIVE trading (dry_run=False) unless TRADING_ENV=PROD.
-    Dry-run is always allowed.
-    """
-    if intent.dry_run:
-        return
-
-    trading_env = os.getenv("TRADING_ENV", "PAPER").upper()
-    if trading_env != "PROD":
-        raise RuntimeError(
-            "LIVE trading (dry_run=false) is blocked because TRADING_ENV != 'PROD'. "
-            "Set TRADING_ENV=PROD in GitHub secrets ONLY when you are ready."
-        )
-
-
-def ensure_market_open_for_live(intent: MCPIntent) -> None:
-    """
-    For LIVE orders, check Alpaca's market clock.
-    If market is closed and ALLOW_AFTER_HOURS != 'true', block the order.
-    Dry-run is always allowed through.
-    """
-    if intent.dry_run:
-        return  # always allowed
-
-    api = get_alpaca_client()
-    try:
-        clock = api.get_clock()
-    except Exception as e:
-        raise RuntimeError(f"Could not fetch Alpaca market clock: {e}")
-
-    if clock.is_open:
-        log("Alpaca clock: market is OPEN")
-        return
-
-    allow_after_hours = os.getenv("ALLOW_AFTER_HOURS", "false").lower() == "true"
-    if allow_after_hours:
-        log("Alpaca clock: market is CLOSED, but ALLOW_AFTER_HOURS=true, proceeding anyway.")
-        return
-
-    # Default: block
-    raise RuntimeError(
-        "Market is currently CLOSED according to Alpaca clock, and ALLOW_AFTER_HOURS is not true. "
-        "Order blocked for safety. If you really want to send orders outside market hours, "
-        "set ALLOW_AFTER_HOURS=true in your GitHub secrets."
-    )
-
-
-# --------- Trading actions ---------
-
-def place_buy_order(intent: MCPIntent) -> None:
-    assert intent.symbol
-    ensure_live_allowed(intent)
-
-    # Decide quantity: if only notional is given, use Alpaca price.
-    qty = intent.quantity
-    if qty is None and intent.notional is not None:
-        last_price = get_alpaca_last_price(intent.symbol)
-        if last_price is not None and last_price > 0:
-            qty = round(intent.notional / last_price, 4)  # allow fractional shares
-            log(f"Computed quantity from notional: {qty} shares at ~{last_price}")
-        else:
-            raise RuntimeError(
-                "Could not determine quantity from notional (Alpaca last price unavailable). "
-                "Either provide 'quantity' explicitly, or try again when price is available."
+class IntentProcessor:
+    """Process trading intents with safety checks"""
+    
+    def __init__(self):
+        self.alpaca = alpaca
+        self.polygon = polygon
+        self.allowed_symbols = ALLOWED_SYMBOLS
+    
+    def validate_symbol(self, symbol: str) -> bool:
+        """Check if symbol is tradeable"""
+        symbol = symbol.upper()
+        if not self.allowed_symbols:
+            logger.warning("No universe loaded - allowing all symbols")
+            return True
+        return symbol in self.allowed_symbols
+    
+    def get_current_price(self, symbol: str) -> Optional[float]:
+        """Get current price estimate"""
+        try:
+            quote = self.polygon.get_last_quote(symbol)
+            return (quote.bid_price + quote.ask_price) / 2
+        except Exception as e:
+            logger.error(f"Failed to get price for {symbol}: {e}")
+            return None
+    
+    def process_buy_intent(self, intent: Dict) -> Dict:
+        """
+        Process BUY intent
+        Expected format:
+        {
+            "action": "buy",
+            "symbol": "AAPL",
+            "quantity": 10,
+            "time_in_force": "day"  # optional
+        }
+        """
+        symbol = intent.get("symbol", "").upper()
+        quantity = int(intent.get("quantity", 0))
+        tif = intent.get("time_in_force", "day").lower()
+        
+        # Validation
+        if not symbol:
+            return {"status": "error", "message": "Missing symbol"}
+        
+        if quantity <= 0:
+            return {"status": "error", "message": "Invalid quantity"}
+        
+        if not self.validate_symbol(symbol):
+            return {"status": "error", "message": f"{symbol} not in allowed universe"}
+        
+        if quantity > MAX_POSITION_SIZE:
+            return {"status": "error", "message": f"Quantity {quantity} exceeds max {MAX_POSITION_SIZE}"}
+        
+        # Check position value
+        price = self.get_current_price(symbol)
+        if not price:
+            return {"status": "error", "message": f"Could not get price for {symbol}"}
+        
+        est_value = quantity * price
+        if est_value > MAX_POSITION_VALUE:
+            return {
+                "status": "error",
+                "message": f"Order value ${est_value:.2f} exceeds max ${MAX_POSITION_VALUE}"
+            }
+        
+        # Place order
+        try:
+            order = self.alpaca.submit_order(
+                symbol=symbol,
+                qty=quantity,
+                side='buy',
+                type='market',
+                time_in_force=tif
             )
-
-    if qty is None or qty <= 0:
-        raise ValueError(f"Invalid quantity: {qty}")
-
-    tif = intent.time_in_force.lower()  # Alpaca expects lowercase: day, gtc, etc.
-    action = "[DRY RUN]" if intent.dry_run else "[LIVE]"
-    log(f"{action} BUY {intent.symbol} qty={qty}, TIF={tif}")
-
-    if intent.comment:
-        log(f"Comment: {intent.comment}")
-
-    # For dry_run, just log and return.
-    if intent.dry_run:
-        return
-
-    # Live order: check market hours
-    ensure_market_open_for_live(intent)
-
-    api = get_alpaca_client()
-    order = api.submit_order(
-        symbol=intent.symbol,
-        qty=qty,
-        side="buy",
-        type="market",
-        time_in_force=tif,
-    )
-    log(f"Alpaca order submitted: {order}")
-
-
-def close_position_symbol(intent: MCPIntent) -> None:
-    assert intent.symbol
-    ensure_live_allowed(intent)
-    action = "[DRY RUN]" if intent.dry_run else "[LIVE]"
-    log(f"{action} CLOSE position for {intent.symbol}")
-
-    if intent.comment:
-        log(f"Comment: {intent.comment}")
-
-    if intent.dry_run:
-        return
-
-    ensure_market_open_for_live(intent)
-
-    api = get_alpaca_client()
-    result = api.close_position(intent.symbol)
-    log(f"Alpaca close_position result: {result}")
-
-
-def close_all_positions(intent: MCPIntent) -> None:
-    ensure_live_allowed(intent)
-    action = "[DRY RUN]" if intent.dry_run else "[LIVE]"
-    log(f"{action} CLOSE ALL positions")
-
-    if intent.comment:
-        log(f"Comment: {intent.comment}")
-
-    if intent.dry_run:
-        return
-
-    ensure_market_open_for_live(intent)
-
-    api = get_alpaca_client()
-    result = api.close_all_positions()
-    log(f"Alpaca close_all_positions result: {result}")
-
-
-def execute_intent(intent: MCPIntent) -> None:
-    log(f"Received intent: {intent}")
-    if intent.intent == "buy":
-        place_buy_order(intent)
-    elif intent.intent == "close":
-        close_position_symbol(intent)
-    elif intent.intent == "close_all":
-        close_all_positions(intent)
-    else:
-        raise ValueError(f"Unknown intent: {intent.intent}")
-
-
-# --------- CLI ---------
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="MCP Intent Runner")
-    parser.add_argument(
-        "--payload-file",
-        required=True,
-        help="Path to JSON file with MCP intent payload (from GitHub repository_dispatch)",
-    )
-    return parser.parse_args()
-
+            
+            result = {
+                "status": "success",
+                "action": "buy",
+                "order_id": order.id,
+                "symbol": order.symbol,
+                "quantity": int(order.qty),
+                "estimated_price": price,
+                "estimated_value": est_value,
+                "time_in_force": order.time_in_force,
+                "submitted_at": str(order.submitted_at)
+            }
+            
+            logger.info(f"BUY order placed: {symbol} x {quantity} @ ~${price:.2f}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Failed to place BUY order: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    def process_sell_intent(self, intent: Dict) -> Dict:
+        """
+        Process SELL intent
+        Expected format:
+        {
+            "action": "sell",
+            "symbol": "AAPL",
+            "quantity": 10  # optional - if omitted, closes entire position
+        }
+        """
+        symbol = intent.get("symbol", "").upper()
+        quantity = intent.get("quantity")
+        
+        if not symbol:
+            return {"status": "error", "message": "Missing symbol"}
+        
+        try:
+            # Check if position exists
+            try:
+                position = self.alpaca.get_position(symbol)
+            except Exception:
+                return {"status": "error", "message": f"No position for {symbol}"}
+            
+            position_qty = int(position.qty)
+            
+            # If no quantity specified, close entire position
+            if quantity is None:
+                self.alpaca.close_position(symbol)
+                logger.info(f"CLOSED position: {symbol} ({position_qty} shares)")
+                return {
+                    "status": "success",
+                    "action": "close",
+                    "symbol": symbol,
+                    "quantity": position_qty,
+                    "avg_entry": float(position.avg_entry_price)
+                }
+            
+            # Otherwise, sell specified quantity
+            quantity = int(quantity)
+            if quantity > position_qty:
+                return {
+                    "status": "error",
+                    "message": f"Cannot sell {quantity} shares - only holding {position_qty}"
+                }
+            
+            order = self.alpaca.submit_order(
+                symbol=symbol,
+                qty=quantity,
+                side='sell',
+                type='market',
+                time_in_force='day'
+            )
+            
+            result = {
+                "status": "success",
+                "action": "sell",
+                "order_id": order.id,
+                "symbol": order.symbol,
+                "quantity": int(order.qty),
+                "submitted_at": str(order.submitted_at)
+            }
+            
+            logger.info(f"SELL order placed: {symbol} x {quantity}")
+            return result
+            
+        except Exception as e:
+            logger.error(f"Failed to process SELL: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    def process_close_intent(self, intent: Dict) -> Dict:
+        """
+        Process CLOSE intent (close entire position)
+        Expected format:
+        {
+            "action": "close",
+            "symbol": "AAPL"
+        }
+        """
+        return self.process_sell_intent({"action": "sell", "symbol": intent.get("symbol")})
+    
+    def process_query_intent(self, intent: Dict) -> Dict:
+        """
+        Process QUERY intents (get account, positions, orders)
+        Expected format:
+        {
+            "action": "query",
+            "type": "account" | "positions" | "orders"
+        }
+        """
+        query_type = intent.get("type", "").lower()
+        
+        try:
+            if query_type == "account":
+                account = self.alpaca.get_account()
+                return {
+                    "status": "success",
+                    "action": "query",
+                    "type": "account",
+                    "data": {
+                        "equity": float(account.equity),
+                        "cash": float(account.cash),
+                        "buying_power": float(account.buying_power),
+                        "portfolio_value": float(account.portfolio_value)
+                    }
+                }
+            
+            elif query_type == "positions":
+                positions = self.alpaca.list_positions()
+                return {
+                    "status": "success",
+                    "action": "query",
+                    "type": "positions",
+                    "data": [{
+                        "symbol": p.symbol,
+                        "qty": int(p.qty),
+                        "avg_entry_price": float(p.avg_entry_price),
+                        "current_price": float(p.current_price),
+                        "unrealized_pl": float(p.unrealized_pl),
+                        "unrealized_plpc": float(p.unrealized_plpc)
+                    } for p in positions]
+                }
+            
+            elif query_type == "orders":
+                orders = self.alpaca.list_orders(status='all', limit=20)
+                return {
+                    "status": "success",
+                    "action": "query",
+                    "type": "orders",
+                    "data": [{
+                        "id": o.id,
+                        "symbol": o.symbol,
+                        "qty": int(o.qty),
+                        "side": o.side,
+                        "status": o.status,
+                        "submitted_at": str(o.submitted_at)
+                    } for o in orders]
+                }
+            
+            else:
+                return {"status": "error", "message": f"Unknown query type: {query_type}"}
+                
+        except Exception as e:
+            logger.error(f"Query failed: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    def process_intent(self, intent: Dict) -> Dict:
+        """Route intent to appropriate processor"""
+        action = intent.get("action", "").lower()
+        
+        logger.info(f"Processing intent: {action}")
+        
+        if action == "buy":
+            return self.process_buy_intent(intent)
+        elif action in ["sell", "close"]:
+            return self.process_sell_intent(intent)
+        elif action == "query":
+            return self.process_query_intent(intent)
+        else:
+            return {"status": "error", "message": f"Unknown action: {action}"}
 
 def main():
-    try:
-        args = parse_args()
-        intent = load_intent_from_file(args.payload_file)
-        execute_intent(intent)
-    except Exception as e:
-        log(f"ERROR: {e}")
+    """Main entry point"""
+    
+    # Read intent from stdin or file
+    if len(sys.argv) > 1:
+        # Intent provided as file path
+        intent_file = sys.argv[1]
+        logger.info(f"Reading intent from file: {intent_file}")
+        with open(intent_file, 'r') as f:
+            intent = json.load(f)
+    else:
+        # Intent from stdin (for GitHub Actions)
+        logger.info("Reading intent from stdin")
+        intent = json.load(sys.stdin)
+    
+    # Process intent
+    processor = IntentProcessor()
+    result = processor.process_intent(intent)
+    
+    # Output result
+    print(json.dumps(result, indent=2))
+    
+    # Exit with appropriate code
+    if result.get("status") == "success":
+        logger.info("Intent processed successfully")
+        sys.exit(0)
+    else:
+        logger.error(f"Intent failed: {result.get('message')}")
         sys.exit(1)
-
 
 if __name__ == "__main__":
     main()
