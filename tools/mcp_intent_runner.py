@@ -3,10 +3,10 @@
 MCP Intent Runner
 
 Reads an intent JSON file (from GitHub repository_dispatch),
-validates it, optionally looks up prices from Polygon,
-and sends orders to Alpaca.
+validates it, uses Alpaca for prices + orders, and performs
+some basic safety checks (env, market hours).
 
-This is written to be simple + copy-paste friendly.
+Polygon is NOT used here (you can still use it elsewhere in your app).
 """
 
 import argparse
@@ -17,7 +17,6 @@ from dataclasses import dataclass
 from typing import Optional, Literal
 
 import alpaca_trade_api as tradeapi
-import polygon
 
 
 # --------- Types ---------
@@ -53,13 +52,12 @@ def get_env(name: str, required: bool = True, default: Optional[str] = None) -> 
     return value
 
 
-# --------- Clients (Alpaca + Polygon) ---------
+# --------- Alpaca client ---------
 
-_alpaca_client = None
-_polygon_client = None
+_alpaca_client: Optional[tradeapi.REST] = None
 
 
-def get_alpaca_client():
+def get_alpaca_client() -> tradeapi.REST:
     """Create (or reuse) an Alpaca REST client."""
     global _alpaca_client
     if _alpaca_client is None:
@@ -75,29 +73,19 @@ def get_alpaca_client():
     return _alpaca_client
 
 
-def get_polygon_client():
-    """Create (or reuse) a Polygon Stocks client."""
-    global _polygon_client
-    if _polygon_client is None:
-        api_key = get_env("POLYGON_API_KEY")
-        log("Connecting to Polygon Stocks API")
-        _polygon_client = polygon.StocksClient(api_key)
-    return _polygon_client
-
-
-def get_polygon_last_price(symbol: str) -> Optional[float]:
+def get_alpaca_last_price(symbol: str) -> Optional[float]:
     """
-    Get current market price for a ticker from Polygon.
+    Get the latest trade price for a symbol from Alpaca.
     If anything fails, returns None instead of crashing.
     """
     try:
-        client = get_polygon_client()
-        price = client.get_current_price(symbol)  # uses get_last_trade under the hood
-        # polygon.StocksClient.get_current_price(symbol) returns a float in client v1.2.8
-        log(f"Polygon price for {symbol}: {price}")
-        return float(price)
+        api = get_alpaca_client()
+        trade = api.get_latest_trade(symbol)
+        price = float(trade.price)
+        log(f"Alpaca latest trade for {symbol}: {price}")
+        return price
     except Exception as e:
-        log(f"WARNING: Could not fetch Polygon price for {symbol}: {e}")
+        log(f"WARNING: Could not fetch Alpaca last price for {symbol}: {e}")
         return None
 
 
@@ -140,46 +128,91 @@ def load_intent_from_file(path: str) -> MCPIntent:
     )
 
 
-# --------- Trading actions ---------
+# --------- Safety checks ---------
 
 def ensure_live_allowed(intent: MCPIntent) -> None:
-    """Block live trading unless TRADING_ENV=PROD."""
+    """
+    Block LIVE trading (dry_run=False) unless TRADING_ENV=PROD.
+    Dry-run is always allowed.
+    """
+    if intent.dry_run:
+        return
+
     trading_env = os.getenv("TRADING_ENV", "PAPER").upper()
-    if not intent.dry_run and trading_env != "PROD":
+    if trading_env != "PROD":
         raise RuntimeError(
             "LIVE trading (dry_run=false) is blocked because TRADING_ENV != 'PROD'. "
             "Set TRADING_ENV=PROD in GitHub secrets ONLY when you are ready."
         )
 
 
+def ensure_market_open_for_live(intent: MCPIntent) -> None:
+    """
+    For LIVE orders, check Alpaca's market clock.
+    If market is closed and ALLOW_AFTER_HOURS != 'true', block the order.
+    Dry-run is always allowed through.
+    """
+    if intent.dry_run:
+        return  # always allowed
+
+    api = get_alpaca_client()
+    try:
+        clock = api.get_clock()
+    except Exception as e:
+        raise RuntimeError(f"Could not fetch Alpaca market clock: {e}")
+
+    if clock.is_open:
+        log("Alpaca clock: market is OPEN")
+        return
+
+    allow_after_hours = os.getenv("ALLOW_AFTER_HOURS", "false").lower() == "true"
+    if allow_after_hours:
+        log("Alpaca clock: market is CLOSED, but ALLOW_AFTER_HOURS=true, proceeding anyway.")
+        return
+
+    # Default: block
+    raise RuntimeError(
+        "Market is currently CLOSED according to Alpaca clock, and ALLOW_AFTER_HOURS is not true. "
+        "Order blocked for safety. If you really want to send orders outside market hours, "
+        "set ALLOW_AFTER_HOURS=true in your GitHub secrets."
+    )
+
+
+# --------- Trading actions ---------
+
 def place_buy_order(intent: MCPIntent) -> None:
     assert intent.symbol
     ensure_live_allowed(intent)
 
-    # Decide quantity: if only notional is given, try to use Polygon price.
+    # Decide quantity: if only notional is given, use Alpaca price.
     qty = intent.quantity
     if qty is None and intent.notional is not None:
-        last_price = get_polygon_last_price(intent.symbol)
+        last_price = get_alpaca_last_price(intent.symbol)
         if last_price is not None and last_price > 0:
             qty = round(intent.notional / last_price, 4)  # allow fractional shares
             log(f"Computed quantity from notional: {qty} shares at ~{last_price}")
         else:
-            raise RuntimeError("Could not determine quantity from notional (Polygon price unavailable)")
+            raise RuntimeError(
+                "Could not determine quantity from notional (Alpaca last price unavailable). "
+                "Either provide 'quantity' explicitly, or try again when price is available."
+            )
 
     if qty is None or qty <= 0:
         raise ValueError(f"Invalid quantity: {qty}")
 
-    # Alpaca expects lowercase time_in_force (day, gtc, ...).
-    tif = intent.time_in_force.lower()
-
+    tif = intent.time_in_force.lower()  # Alpaca expects lowercase: day, gtc, etc.
     action = "[DRY RUN]" if intent.dry_run else "[LIVE]"
     log(f"{action} BUY {intent.symbol} qty={qty}, TIF={tif}")
 
+    if intent.comment:
+        log(f"Comment: {intent.comment}")
+
     # For dry_run, just log and return.
     if intent.dry_run:
-        if intent.comment:
-            log(f"Comment: {intent.comment}")
         return
+
+    # Live order: check market hours
+    ensure_market_open_for_live(intent)
 
     api = get_alpaca_client()
     order = api.submit_order(
@@ -198,10 +231,13 @@ def close_position_symbol(intent: MCPIntent) -> None:
     action = "[DRY RUN]" if intent.dry_run else "[LIVE]"
     log(f"{action} CLOSE position for {intent.symbol}")
 
+    if intent.comment:
+        log(f"Comment: {intent.comment}")
+
     if intent.dry_run:
-        if intent.comment:
-            log(f"Comment: {intent.comment}")
         return
+
+    ensure_market_open_for_live(intent)
 
     api = get_alpaca_client()
     result = api.close_position(intent.symbol)
@@ -213,10 +249,13 @@ def close_all_positions(intent: MCPIntent) -> None:
     action = "[DRY RUN]" if intent.dry_run else "[LIVE]"
     log(f"{action} CLOSE ALL positions")
 
+    if intent.comment:
+        log(f"Comment: {intent.comment}")
+
     if intent.dry_run:
-        if intent.comment:
-            log(f"Comment: {intent.comment}")
         return
+
+    ensure_market_open_for_live(intent)
 
     api = get_alpaca_client()
     result = api.close_all_positions()
