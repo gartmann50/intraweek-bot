@@ -63,12 +63,24 @@ class IntentProcessor:
         return symbol in self.allowed_symbols
     
     def get_current_price(self, symbol: str) -> Optional[float]:
-        """Get current price estimate"""
+        """Get current price estimate - try Polygon, fallback to Alpaca"""
         try:
+            # Try Polygon first
             quote = self.polygon.get_last_quote(symbol)
             return (quote.bid_price + quote.ask_price) / 2
         except Exception as e:
-            logger.error(f"Failed to get price for {symbol}: {e}")
+            logger.warning(f"Polygon failed for {symbol}: {e}")
+            
+            # Fallback to Alpaca's last trade price
+            try:
+                bars = self.alpaca.get_bars(symbol, '1Min', limit=1).df
+                if not bars.empty:
+                    price = bars['close'].iloc[-1]
+                    logger.info(f"Using Alpaca price for {symbol}: ${price:.2f}")
+                    return float(price)
+            except Exception as e2:
+                logger.error(f"Alpaca also failed for {symbol}: {e2}")
+            
             return None
     
     def process_buy_intent(self, intent: Dict) -> Dict:
