@@ -1,0 +1,46 @@
+name: MCP Intent Test (Manual)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-mcp-intent:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Write TEST payload to file
+        run: |
+          cat << 'EOF' > mcp_payload.json
+          {
+            "intent": "buy",
+            "symbol": "AAPL",
+            "notional": 100,
+            "time_in_force": "DAY",
+            "dry_run": true,
+            "comment": "GitHub manual test via MCP runner"
+          }
+          EOF
+
+      - name: Run MCP Intent Runner
+        env:
+          ALPACA_API_KEY: ${{ secrets.ALPACA_KEY }}
+          ALPACA_API_SECRET: ${{ secrets.ALPACA_SECRET }}
+          ALPACA_BASE_URL: ${{ secrets.ALPACA_BASE_URL }}
+
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+
+          TRADING_ENV: ${{ secrets.TRADING_ENV }}
+        run: |
+          python tools/mcp_intent_runner.py --payload-file mcp_payload.json
