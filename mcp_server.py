@@ -59,7 +59,7 @@ async def list_tools() -> List[Tool]:
     return [
         Tool(
             name="get_quote",
-            description="Get real-time quote for a symbol from Polygon",
+            description="Get real-time quote for a symbol from Alpaca (live trading data)",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -70,7 +70,7 @@ async def list_tools() -> List[Tool]:
         ),
         Tool(
             name="get_bars",
-            description="Get historical price bars (OHLCV) from Polygon",
+            description="Get historical price bars (OHLCV) from Polygon (historical data only, not real-time)",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -168,30 +168,53 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
         return [TextContent(type="text", text=f"Error: {str(e)}")]
 
 async def get_quote(symbol: str) -> List[TextContent]:
-    """Fetch real-time quote from Polygon"""
+    """Fetch real-time quote from Alpaca (live trading data)"""
     symbol = symbol.upper()
     
     try:
-        quote = polygon.get_last_quote(symbol)
+        # Use Alpaca for real-time trading data
+        snapshot = alpaca.get_snapshot(symbol)
+        
+        # Get latest trade
+        latest_trade = None
+        if hasattr(snapshot, 'latest_trade') and snapshot.latest_trade:
+            latest_trade = {
+                "price": float(snapshot.latest_trade.p),
+                "size": int(snapshot.latest_trade.s),
+                "timestamp": str(snapshot.latest_trade.t)
+            }
+        
+        # Get latest quote
+        latest_quote = None
+        if hasattr(snapshot, 'latest_quote') and snapshot.latest_quote:
+            latest_quote = {
+                "bid": float(snapshot.latest_quote.bp),
+                "bid_size": int(snapshot.latest_quote.bs),
+                "ask": float(snapshot.latest_quote.ap),
+                "ask_size": int(snapshot.latest_quote.as_),
+                "timestamp": str(snapshot.latest_quote.t)
+            }
+        
         data = {
             "symbol": symbol,
-            "bid": quote.bid_price,
-            "ask": quote.ask_price,
-            "last": (quote.bid_price + quote.ask_price) / 2,
-            "timestamp": quote.sip_timestamp
+            "source": "Alpaca (live)",
+            "latest_trade": latest_trade,
+            "latest_quote": latest_quote
         }
+        
         return [TextContent(type="text", text=json.dumps(data, indent=2))]
     except Exception as e:
-        return [TextContent(type="text", text=f"Error fetching quote: {e}")]
+        return [TextContent(type="text", text=f"Error fetching quote from Alpaca: {e}")]
 
 async def get_bars(symbol: str, timespan: str, limit: int) -> List[TextContent]:
-    """Fetch historical bars from Polygon"""
+    """Fetch historical bars from Polygon (historical data only)"""
     symbol = symbol.upper()
     
     try:
         end = datetime.now()
         start = end - timedelta(days=limit if timespan == "day" else 7)
         
+        # Use Polygon for historical data
         bars = polygon.get_aggs(
             symbol,
             1,
@@ -210,9 +233,16 @@ async def get_bars(symbol: str, timespan: str, limit: int) -> List[TextContent]:
             "volume": bar.volume
         } for bar in bars]
         
-        return [TextContent(type="text", text=json.dumps(data, indent=2))]
+        result = {
+            "symbol": symbol,
+            "source": "Polygon (historical)",
+            "timespan": timespan,
+            "bars": data
+        }
+        
+        return [TextContent(type="text", text=json.dumps(result, indent=2))]
     except Exception as e:
-        return [TextContent(type="text", text=f"Error fetching bars: {e}")]
+        return [TextContent(type="text", text=f"Error fetching historical bars from Polygon: {e}")]
 
 async def get_account() -> List[TextContent]:
     """Get Alpaca account info"""
@@ -247,7 +277,7 @@ async def get_positions() -> List[TextContent]:
         return [TextContent(type="text", text=f"Error fetching positions: {e}")]
 
 async def place_order(symbol: str, qty: int, side: str, time_in_force: str) -> List[TextContent]:
-    """Place market order with safety checks"""
+    """Place market order with safety checks - uses Alpaca for current price"""
     symbol = symbol.upper()
     
     # Safety checks
@@ -258,9 +288,19 @@ async def place_order(symbol: str, qty: int, side: str, time_in_force: str) -> L
         return [TextContent(type="text", text=f"ERROR: Quantity {qty} exceeds max {MAX_POSITION_SIZE}")]
     
     try:
-        # Get current price estimate
-        quote = polygon.get_last_quote(symbol)
-        est_price = (quote.bid_price + quote.ask_price) / 2
+        # Get current price from Alpaca (real-time trading data)
+        snapshot = alpaca.get_snapshot(symbol)
+        
+        # Try to get price from latest trade or quote
+        est_price = None
+        if hasattr(snapshot, 'latest_trade') and snapshot.latest_trade:
+            est_price = float(snapshot.latest_trade.p)
+        elif hasattr(snapshot, 'latest_quote') and snapshot.latest_quote:
+            est_price = (float(snapshot.latest_quote.bp) + float(snapshot.latest_quote.ap)) / 2
+        
+        if not est_price:
+            return [TextContent(type="text", text=f"ERROR: Could not get current price for {symbol}")]
+        
         est_value = qty * est_price
         
         if side.lower() == "buy" and est_value > MAX_POSITION_VALUE:
@@ -283,7 +323,10 @@ async def place_order(symbol: str, qty: int, side: str, time_in_force: str) -> L
             "side": order.side,
             "type": order.type,
             "time_in_force": order.time_in_force,
-            "submitted_at": str(order.submitted_at)
+            "estimated_price": est_price,
+            "estimated_value": est_value,
+            "submitted_at": str(order.submitted_at),
+            "data_source": "Alpaca (live)"
         }
         
         logger.info(f"Order placed: {result}")
