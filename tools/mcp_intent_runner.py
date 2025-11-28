@@ -63,24 +63,37 @@ class IntentProcessor:
         return symbol in self.allowed_symbols
     
     def get_current_price(self, symbol: str) -> Optional[float]:
-        """Get current price estimate - try Polygon, fallback to Alpaca"""
+        """Get current price from Alpaca (real-time trading data)"""
         try:
-            # Try Polygon first
-            quote = self.polygon.get_last_quote(symbol)
-            return (quote.bid_price + quote.ask_price) / 2
+            # Use Alpaca for live trading data
+            snapshot = self.alpaca.get_snapshot(symbol)
+            
+            # Try latest trade first
+            if hasattr(snapshot, 'latest_trade') and snapshot.latest_trade:
+                price = float(snapshot.latest_trade.p)
+                logger.info(f"Alpaca live price for {symbol}: ${price:.2f}")
+                return price
+            
+            # Fallback to latest quote
+            if hasattr(snapshot, 'latest_quote') and snapshot.latest_quote:
+                bid = float(snapshot.latest_quote.bp)
+                ask = float(snapshot.latest_quote.ap)
+                price = (bid + ask) / 2
+                logger.info(f"Alpaca quote price for {symbol}: ${price:.2f}")
+                return price
+            
+            # Last resort: get latest bar
+            bars = self.alpaca.get_bars(symbol, '1Min', limit=1).df
+            if not bars.empty:
+                price = float(bars['close'].iloc[-1])
+                logger.info(f"Alpaca bar price for {symbol}: ${price:.2f}")
+                return price
+                
+            logger.error(f"No price data available for {symbol}")
+            return None
+            
         except Exception as e:
-            logger.warning(f"Polygon failed for {symbol}: {e}")
-            
-            # Fallback to Alpaca's last trade price
-            try:
-                bars = self.alpaca.get_bars(symbol, '1Min', limit=1).df
-                if not bars.empty:
-                    price = bars['close'].iloc[-1]
-                    logger.info(f"Using Alpaca price for {symbol}: ${price:.2f}")
-                    return float(price)
-            except Exception as e2:
-                logger.error(f"Alpaca also failed for {symbol}: {e2}")
-            
+            logger.error(f"Failed to get price for {symbol}: {e}")
             return None
     
     def process_buy_intent(self, intent: Dict) -> Dict:
