@@ -30,6 +30,15 @@ def main():
     # This starts the official MCP HTTP server using your app
     http_server(app, host=host, port=port)
 
+def start_server():
+    import uvicorn
+    uvicorn.run(
+        "mcp_http_server:app",
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", 8000))
+    )
+
+
 
 if __name__ == "__main__":
     main()
