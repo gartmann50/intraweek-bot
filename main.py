@@ -1,5 +1,4 @@
-import asyncio
-from mcp_server import main as mcp_main
+from mcp_http_server import start_server
 
 if __name__ == "__main__":
-    asyncio.run(mcp_main())
+    start_server()
