@@ -2,3 +2,11 @@ alpaca-trade-api==3.2.0
 polygon==1.2.8
 fastapi
 uvicorn
+alpaca_trade_api
+polygon-api-client
+pandas
+numpy
+matplotlib
+fastapi
+uvicorn[standard]
+mcp
