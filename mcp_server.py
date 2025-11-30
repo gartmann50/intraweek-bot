@@ -440,15 +440,48 @@ Change: ${change:+.2f} ({change_pct:+.2f}%)
     except Exception as e:
         return [TextContent(type="text", text=f"Error: {e}")]
 
-async def main():
+from mcp.server.http import StreamableHTTPSessionManager
+import uvicorn
+
+async def main_stdio():
+    """StdIO mode – used by Claude Desktop on your PC."""
     from mcp.server.stdio import stdio_server
-    
-    logger.info("Starting Claude Trading MCP Server...")
+
+    logger.info("Starting Claude Trading MCP Server (stdio)...")
     logger.info(f"Web app URL: {WEBAPP_URL}")
     logger.info(f"Analytics webhook: {ANALYTICS_WEBHOOK}")
-    
+
     async with stdio_server() as (read_stream, write_stream):
         await app.run(read_stream, write_stream, app.create_initialization_options())
 
+
+async def run_http_server():
+    """HTTP mode – used by Railway / Claude Mobile."""
+    port = int(os.getenv("PORT", "8000"))
+
+    logger.info("Starting Claude Trading MCP Server (HTTP)...")
+    logger.info(f"Listening on 0.0.0.0:{port}")
+    logger.info(f"Web app URL: {WEBAPP_URL}")
+    logger.info(f"Analytics webhook: {ANALYTICS_WEBHOOK}")
+
+    manager = StreamableHTTPSessionManager(
+        app,
+        stateless=False  # keep sessions, good for conversations
+    )
+
+    uvicorn.run(
+        manager.as_asgi_app(),
+        host="0.0.0.0",
+        port=port,
+    )
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    import sys
+
+    # If we run: python mcp_server.py --http  -> HTTP server (Railway)
+    # If we run: python mcp_server.py        -> stdio server (Desktop)
+    if "--http" in sys.argv:
+        asyncio.run(run_http_server())
+    else:
+        asyncio.run(main_stdio())
