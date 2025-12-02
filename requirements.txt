@@ -1,8 +1,11 @@
-alpaca-trade-api==3.2.0
-polygon-api-client==1.13.1   # or latest, but pin to a version
+alpaca-trade-api
+polygon-api-client
+
 pandas
 numpy
 matplotlib
+
 fastapi
-uvicorn[standard]
-mcp
+uvicorn
+
+mcp[server,http]
