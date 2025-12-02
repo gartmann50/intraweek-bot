@@ -1,14 +1,8 @@
 alpaca-trade-api==3.2.0
-polygon==1.2.8
-alpaca_trade_api
 polygon-api-client
-
 pandas
 numpy
 matplotlib
-
 fastapi
 uvicorn[standard]
-
-# IMPORTANT: use an older mcp that still exposes mcp.server.http
-mcp==0.4.2
+mcp>=1.3.0
