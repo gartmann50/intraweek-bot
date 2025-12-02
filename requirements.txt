@@ -1,9 +1,5 @@
 alpaca-trade-api==3.2.0
-polygon==1.2.8
-fastapi
-uvicorn
-alpaca_trade_api
-polygon-api-client
+polygon-api-client==1.13.1   # or latest, but pin to a version
 pandas
 numpy
 matplotlib
