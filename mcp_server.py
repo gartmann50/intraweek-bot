@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 # API Config
 ALPACA_KEY = os.getenv("ALPACA_API_KEY") or os.getenv("ALPACA_API_KEY_ID")
 ALPACA_SECRET = os.getenv("ALPACA_SECRET_KEY") or os.getenv("ALPACA_API_SECRET_KEY")
-ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://paper-api.alpaca.markets")
+ALPACA_BASE_URL = os.getenv("ALPACA_BASE_URL", "https://api.alpaca.markets")
 POLYGON_KEY = os.getenv("POLYGON_API_KEY")
 
 # YOUR VERCEL APP URL
