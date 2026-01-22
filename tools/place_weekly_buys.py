@@ -1,29 +1,28 @@
 #!/usr/bin/env python3
 """
-Place weekly buy orders using whole shares only.
+API-only weekly buys (no local CSV / no DATA_DIR).
 
-Price source fallback chain (first that works wins):
-  1) Alpaca latest trade (/v2/stocks/{sym}/trades/latest) -> price
-  2) Alpaca latest quote (/v2/stocks/{sym}/quotes/latest) -> (bid+ask)/2
-  3) Local CSV in DATA_DIR (last close)
-
-Requires env:
-  ALPACA_KEY, ALPACA_SECRET, ALPACA_ENV in {paper,live}
-  NOTIONAL_PER  (e.g. "5000")
-Optional:
-  DATA_DIR (default: stock_data_400)
 Inputs:
   backtests/buy_symbols.txt  (one symbol per line)
+
+Env:
+  ALPACA_KEY, ALPACA_SECRET
+  ALPACA_ENV in {paper, live}  (default: paper)
+  NOTIONAL_PER (e.g. "5000")
+
 Outputs:
   backtests/buy_exec_report.csv
-  backtests/model_symbols.txt   <-- NEW: symbols successfully placed by this model
+  backtests/model_symbols.txt   (symbols this model bought/holds this week)
 """
 
-import os, sys, json, glob, math, time
-from typing import Optional, Tuple, List
+import os
+import sys
+import math
+import time
+from pathlib import Path
+from typing import Optional, List, Dict, Any
 import requests
 import pandas as pd
-from pathlib import Path
 
 TRADING_PAPER = "https://paper-api.alpaca.markets"
 TRADING_LIVE  = "https://api.alpaca.markets"
@@ -42,143 +41,138 @@ HEADERS = {
 def trading_base() -> str:
     return TRADING_PAPER if ALPACA_ENV.startswith("paper") else TRADING_LIVE
 
-def read_buy_symbols(path="backtests/buy_symbols.txt") -> List[str]:
+def read_symbols(path: str) -> List[str]:
     p = Path(path)
     if not p.exists():
-        print(f"[buy] no list found at {p} -> nothing to do")
         return []
-    syms = []
-    for line in p.read_text().splitlines():
+    syms: List[str] = []
+    for line in p.read_text(encoding="utf-8").splitlines():
         s = line.strip().upper()
         if s:
             syms.append(s)
     return syms
 
-def alpaca_latest_trade(sym: str) -> Optional[float]:
+def latest_trade_price(sym: str) -> Optional[float]:
     try:
-        r = requests.get(f"{DATA_BASE}/stocks/{sym}/trades/latest", headers=HEADERS, timeout=15)
+        r = requests.get(f"{DATA_BASE}/stocks/{sym}/trades/latest", headers=HEADERS, timeout=20)
         if r.status_code == 200:
             j = r.json() or {}
-            # v2 format: {"symbol":"AAPL","trade":{"p": 123.45, ...}}
-            t = (j.get("trade") or {})
+            t = j.get("trade") or {}
             p = t.get("p")
             if isinstance(p, (int, float)) and p > 0:
                 return float(p)
     except Exception as e:
-        print(f"[price] trade err {sym}: {e}")
+        print(f"[price] trade error {sym}: {e}")
     return None
 
-def alpaca_latest_quote_mid(sym: str) -> Optional[float]:
+def latest_quote_mid(sym: str) -> Optional[float]:
     try:
-        r = requests.get(f"{DATA_BASE}/stocks/{sym}/quotes/latest", headers=HEADERS, timeout=15)
+        r = requests.get(f"{DATA_BASE}/stocks/{sym}/quotes/latest", headers=HEADERS, timeout=20)
         if r.status_code == 200:
             j = r.json() or {}
-            # v2 format: {"symbol":"AAPL","quote":{"bp":..., "ap":...}}
-            q = (j.get("quote") or {})
-            bp, ap = q.get("bp"), q.get("ap")
+            q = j.get("quote") or {}
+            bp = q.get("bp")
+            ap = q.get("ap")
             if isinstance(bp, (int, float)) and isinstance(ap, (int, float)) and ap > 0:
                 return (float(bp) + float(ap)) / 2.0
     except Exception as e:
-        print(f"[price] quote err {sym}: {e}")
+        print(f"[price] quote error {sym}: {e}")
     return None
 
 def resolve_price(sym: str) -> Optional[float]:
-   for fn in (alpaca_latest_trade, alpaca_latest_quote_mid) :
-        p = fn(sym)
-        if p and p > 0:
-            return float(p)
+    p = latest_trade_price(sym)
+    if p and p > 0:
+        return p
+    p = latest_quote_mid(sym)
+    if p and p > 0:
+        return p
     return None
 
-def asset_meta(sym: str) -> Tuple[bool,bool]:
-    """tradable, fractionable (we only buy whole shares, but useful to log)"""
+def asset_is_tradable(sym: str) -> bool:
     try:
-        r = requests.get(f"{trading_base()}/v2/assets/{sym}", headers=HEADERS, timeout=15)
+        r = requests.get(f"{trading_base()}/v2/assets/{sym}", headers=HEADERS, timeout=20)
         if r.status_code == 200:
             j = r.json() or {}
-            return bool(j.get("tradable", False)), bool(j.get("fractionable", False))
+            return bool(j.get("tradable", False))
     except Exception:
         pass
-    return False, False
+    return False
 
-def place_market_buy(sym: str, qty: int) -> Tuple[bool,str]:
+def place_market_buy(sym: str, qty: int) -> Dict[str, Any]:
+    o = {"symbol": sym, "qty": qty, "side": "buy", "type": "market", "time_in_force": "day"}
     try:
-        o = {
-            "symbol": sym,
-            "qty": qty,
-            "side": "buy",
-            "type": "market",
-            "time_in_force": "day"
-        }
-        r = requests.post(f"{trading_base()}/v2/orders", headers=HEADERS, json=o, timeout=20)
+        r = requests.post(f"{trading_base()}/v2/orders", headers=HEADERS, json=o, timeout=30)
         if r.status_code in (200, 201):
             oid = (r.json() or {}).get("id", "")
-            print(f"[buy] placed {sym} qty={qty} id={oid}")
-            return True, oid
-        else:
-            print(f"[buy] FAIL {sym} qty={qty} code={r.status_code} msg={r.text[:300]}")
+            return {"ok": True, "order_id": oid, "status": "placed"}
+        return {"ok": False, "order_id": "", "status": f"fail_{r.status_code}", "msg": r.text[:300]}
     except Exception as e:
-        print(f"[buy] EXC {sym} qty={qty}: {e}")
-    return False, ""
+        return {"ok": False, "order_id": "", "status": "exception", "msg": str(e)[:300]}
 
-def main():
+def append_model_symbols(new_syms: List[str], path: str = "backtests/model_symbols.txt") -> None:
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    existing = set(read_symbols(path))
+    for s in new_syms:
+        existing.add(s)
+    p.write_text("\n".join(sorted(existing)) + ("\n" if existing else ""), encoding="utf-8")
+
+def main() -> int:
     if not (ALPACA_KEY and ALPACA_SECRET):
-        print("Missing ALPACA_KEY/ALPACA_SECRET"); sys.exit(1)
+        print("ERROR: Missing ALPACA_KEY/ALPACA_SECRET")
+        return 2
     if NOTIONAL_PER <= 0:
-        print("NOTIONAL_PER must be > 0"); sys.exit(1)
+        print("ERROR: NOTIONAL_PER must be > 0")
+        return 2
 
     Path("backtests").mkdir(exist_ok=True)
-    symbols = read_buy_symbols()
-    if not symbols:
-        print("[buy] no symbols to buy; exit 0")
-        Path("backtests/model_symbols.txt").write_text("")  # NEW: keep file present
-        return
+
+    buy_list = read_symbols("backtests/buy_symbols.txt")
+    if not buy_list:
+        print("[buy] backtests/buy_symbols.txt empty or missing -> nothing to do")
+        return 0
 
     rows = []
-    placed = 0
+    bought_syms: List[str] = []
 
-    # NEW: track symbols successfully submitted by this model
-    model_syms: List[str] = []
-
-    for s in symbols:
-        price = resolve_price(s)
-        if not price or price <= 0:
-            print(f"[buy] {s}: no price -> skip.")
-            rows.append({"symbol": s, "status": "skip_no_price"})
+    for sym in buy_list:
+        price = resolve_price(sym)
+        if not price:
+            rows.append({"symbol": sym, "status": "skip_no_price"})
+            print(f"[buy] {sym}: skip (no price from Alpaca data API)")
             continue
 
-        tradable, fractionable = asset_meta(s)
-        if not tradable:
-            print(f"[buy] {s}: not tradable -> skip.")
-            rows.append({"symbol": s, "status": "skip_not_tradable", "price": price})
+        if not asset_is_tradable(sym):
+            rows.append({"symbol": sym, "status": "skip_not_tradable", "price_used": price})
+            print(f"[buy] {sym}: skip (not tradable)")
             continue
 
         qty = int(math.floor(NOTIONAL_PER / price))
         if qty < 1:
-            print(f"[buy] {s}: floor({NOTIONAL_PER}/{price:.2f}) < 1 -> skip.")
-            rows.append({"symbol": s, "status": "skip_small_budget", "price": price})
+            rows.append({"symbol": sym, "status": "skip_small_budget", "price_used": price})
+            print(f"[buy] {sym}: skip (budget too small for whole shares at {price:.2f})")
             continue
 
-        ok, oid = place_market_buy(s, qty)
-        rows.append({
-            "symbol": s, "status": "placed" if ok else "failed",
-            "price_used": price, "qty": qty, "order_id": oid,
-            "fractionable": fractionable
-        })
-        if ok:
-            placed += 1
-            model_syms.append(s)  # NEW
-        time.sleep(0.2)  # be polite
+        res = place_market_buy(sym, qty)
+        row = {"symbol": sym, "price_used": price, "qty": qty, **res}
+        rows.append(row)
 
-    # NEW: write allow-list for Friday flatten to use
-    Path("backtests/model_symbols.txt").write_text(
-        "\n".join(sorted(set(model_syms))) + ("\n" if model_syms else "")
-    )
-    print("[buy] model_symbols.txt:", sorted(set(model_syms)))
+        if res.get("ok"):
+            bought_syms.append(sym)
+            print(f"[buy] placed {sym} qty={qty} at est_price={price:.2f} id={res.get('order_id','')}")
+        else:
+            print(f"[buy] FAILED {sym} qty={qty}: {res.get('status')} {res.get('msg','')}")
 
-    df = pd.DataFrame(rows)
-    df.to_csv("backtests/buy_exec_report.csv", index=False)
-    print(f"[buy] placed={placed}, skipped={len(symbols)-placed}")
-    print(f"[buy] report: backtests/buy_exec_report.csv")
+        time.sleep(0.25)
+
+    pd.DataFrame(rows).to_csv("backtests/buy_exec_report.csv", index=False)
+
+    # Track model symbols for later "flatten model only" logic
+    if bought_syms:
+        append_model_symbols(bought_syms, "backtests/model_symbols.txt")
+
+    print(f"[buy] done. report=backtests/buy_exec_report.csv, model_symbols={'yes' if bought_syms else 'no'}")
+    return 0
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
