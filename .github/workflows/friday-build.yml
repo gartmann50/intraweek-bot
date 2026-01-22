@@ -65,37 +65,13 @@ jobs:
       - name: Export WEEK (nominal Monday) for later steps
         run: echo "WEEK=${{ steps.when.outputs.monday }}" >> $GITHUB_ENV
 
-      - name: Build universe (ADV$) with fallback
-        env:
-          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
-        run: |
-          set -euo pipefail
-          python tools/make_universe_topvol.py \
-            --adv-days 21 \
-            --topvol 1000 \
-            --min-price 5 \
-            --out-dir backtests
-      
-          N=$(wc -l < backtests/universe_topvol.txt || echo 0)
-          echo "[universe] size: $N"
-          if [ "$N" -lt 800 ]; then
-            echo "[fallback] universe too small ($N) — rebuilding looser…"
-            python tools/make_universe_topvol.py \
-              --adv-days 21 \
-              --topvol 1200 \
-              --min-price 3 \
-              --out-dir backtests
-            echo "[fallback] new size: $(wc -l < backtests/universe_topvol.txt)"
-          fi
-      
-          sed -n '1,8p' backtests/universe_topvol.csv
-
       
       - name: Build picklist (API, no local data)
         env:
           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
         run: |
           python build_picklist_parametric.py \
+            --symbols-file backtests/universe_topvol.txt \
             --rsi-min 68 --max-ext20 0.15 --top-per-week 40 \
             --until "${{ steps.when.outputs.friday }}" \
             --lookback-days 45 \
