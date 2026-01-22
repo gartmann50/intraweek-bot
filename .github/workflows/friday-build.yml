@@ -1,19 +1,15 @@
-name: IW Bot - Friday Build
+name: IW Bot — Friday Build
 
 on:
   schedule:
-    - cron: "25 21 * * 5"  # Friday after U.S. close (EST)
-    - cron: "25 20 * * 5"  # Friday after U.S. close (EDT)
+    - cron: "25 21 * * 5"     # Friday after US close (EST)
+    - cron: "25 20 * * 5"     # Friday after US close (EDT)
   workflow_dispatch:
     inputs:
       topk:
         description: "Top-K to preview/email"
         required: false
         default: "6"
-      hi70_preview:
-        description: "Optional comma-separated 70D tickers to include (testing only)"
-        required: false
-        default: ""
 
 concurrency:
   group: iwbot-friday-build
@@ -27,47 +23,53 @@ jobs:
       actions: read
 
     env:
-      TOPK: ${{ inputs.topk != '' && inputs.topk || '6' }}
+      TOPK: ${{ inputs.topk || '6' }}
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Hard remove any local dataset dir
-        run: |
-          rm -rf stock_data_400
-          echo "Removed stock_data_400 if present"
+      # --- Safety: ensure NO local datasets ever ---
+      - name: Remove any local dataset dir
+        run: rm -rf stock_data_400
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install deps
-        env:
-          MPLBACKEND: Agg
         run: |
           python -m pip install --upgrade pip
-          pip install --upgrade pandas numpy pyyaml requests matplotlib pillow
+          pip install pandas numpy requests pyyaml matplotlib pillow
+        env:
+          MPLBACKEND: Agg
 
+      # --- Compute Friday anchor ---
       - name: Compute last Friday (Europe/Oslo)
         id: when
         shell: python
         run: |
           from datetime import datetime, timedelta
-          import zoneinfo, os, json
-          tz = zoneinfo.ZoneInfo("Europe/Oslo")
-          now = datetime.now(tz).date()
-          while now.weekday() != 4:
-              now -= timedelta(days=1)
-          mon = (now + timedelta(days=3)).isoformat()
-          with open("runner_dates.json", "w") as f:
-              json.dump({"friday": now.isoformat(), "monday": mon}, f)
-          with open(os.environ["GITHUB_OUTPUT"], "a") as g:
-              g.write(f"friday={now}\n")
-              g.write(f"monday={mon}\n")
+          from zoneinfo import ZoneInfo
+          import os, json
 
-      - name: Export WEEK (nominal Monday) for later steps
+          tz = ZoneInfo("Europe/Oslo")
+          d = datetime.now(tz).date()
+          while d.weekday() != 4:
+              d -= timedelta(days=1)
+
+          monday = (d + timedelta(days=3)).isoformat()
+
+          with open("runner_dates.json","w") as f:
+              json.dump({"friday": d.isoformat(), "monday": monday}, f)
+
+          with open(os.environ["GITHUB_OUTPUT"],"a") as g:
+              g.write(f"friday={d}\n")
+              g.write(f"monday={monday}\n")
+
+      - name: Export WEEK
         run: echo "WEEK=${{ steps.when.outputs.monday }}" >> $GITHUB_ENV
 
+      # --- Build dynamic universe ONCE ---
       - name: Build universe (ADV$) with fallback
         env:
           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
@@ -79,21 +81,18 @@ jobs:
             --min-price 5 \
             --out-dir backtests
 
-          N=$(wc -l < backtests/universe_topvol.txt || echo 0)
-          echo "[universe] size: $N"
+          N=$(wc -l < backtests/universe_topvol.txt)
+          echo "[universe] size=$N"
+
           if [ "$N" -lt 800 ]; then
-            echo "[fallback] universe too small ($N) - rebuilding looser..."
             python tools/make_universe_topvol.py \
               --adv-days 21 \
               --topvol 1200 \
               --min-price 3 \
               --out-dir backtests
-            echo "[fallback] new size: $(wc -l < backtests/universe_topvol.txt)"
           fi
 
-          echo "[universe] head:"
-          sed -n '1,8p' backtests/universe_topvol.csv
-
+      # --- Build picklist (API ONLY) ---
       - name: Build picklist (API only, no local data)
         env:
           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
@@ -103,20 +102,17 @@ jobs:
             --rsi-min 68 \
             --max-ext20 0.15 \
             --top-per-week 40 \
-            --until "${{ steps.when.outputs.friday }}" \
             --lookback-days 45 \
+            --until "${{ steps.when.outputs.friday }}" \
             --out backtests/picklist_highrsi_trend.csv
 
+      # --- Assert local data never sneaks back ---
       - name: Assert no local dataset present
         run: |
-          if [ -d stock_data_400 ]; then
-            echo "ERROR: stock_data_400 exists (local data directory present)"
-            ls -la stock_data_400 || true
-            exit 1
-          fi
-          echo "OK: no stock_data_400 directory"
+          test ! -d stock_data_400 && echo "OK: no stock_data_400 directory"
 
-      - name: Filter light short-term trend (no >=2 consecutive down weeks)
+      # --- Trend filter ---
+      - name: Filter light short-term trend
         env:
           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
         run: |
@@ -128,87 +124,43 @@ jobs:
             --max-consecutive-down 1 \
             --down-eps 0.002
 
-      - name: Filter picklist by dynamic universe
+      # --- Enforce universe ---
+      - name: Filter picklist by universe
         run: |
           python tools/filter_picklist_by_symbols.py \
             backtests/universe_topvol.txt \
             backtests/picklist_highrsi_trend.csv \
             backtests/picklist_highrsi_trend.csv
 
-      - name: Preview Top-K (save file)
+      # --- Preview Top-K ---
+      - name: Preview Top-K
         run: |
-          set -e
           python preview_top6.py \
             --picklist backtests/picklist_highrsi_trend.csv \
-            --topk "${{ inputs.topk != '' && inputs.topk || '6' }}" \
+            --topk "${{ env.TOPK }}" \
             --week "${{ steps.when.outputs.friday }}" \
             > backtests/top6_preview.txt
 
-      - name: Download 70D-highs artifact (if available)
+      # --- Optional hi70 ---
+      - name: Download hi70 artifact
         if: always()
         uses: dawidd6/action-download-artifact@v2
         with:
-          repo: ${{ github.repository }}
           workflow: hi70-scan.yml
           workflow_conclusion: success
-          branch: main
           name_is_regexp: true
           name: ^hi70-.*$
           path: backtests
-          allow_forks: true
           if_no_artifact_found: warn
 
-      - name: Locate hi70 CSV (set HI70_CSV)
-        shell: bash
-        run: |
-          set -euo pipefail
-          CSV="$(find backtests -maxdepth 2 -type f -name 'hi70_thisweek.csv' -print -quit || true)"
-          if [[ -n "$CSV" ]]; then
-            echo "HI70_CSV=$CSV" >> "$GITHUB_ENV"
-            echo "[hi70] found: $CSV"
-            sed -n '1,12p' "$CSV" || true
-          else
-            echo "[hi70] CSV not found."
-          fi
-
-      - name: Filter hi70 results to shared universe
-        if: env.HI70_CSV != ''
-        run: |
-          python tools/filter_picklist_by_symbols.py \
-            backtests/universe_topvol.txt \
-            "$HI70_CSV" \
-            "$HI70_CSV"
-          sed -n '1,12p' "$HI70_CSV" || true
-
-      - name: Build mini-charts + HTML
+      # --- Charts + email ---
+      - name: Build email assets
         env:
           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
-          MPLBACKEND: Agg
         run: |
           python tools/make_email_assets.py \
             --picklist backtests/picklist_highrsi_trend.csv \
-            --hi70 backtests/hi70_thisweek.csv \
-            --topk "${{ inputs.topk != '' && inputs.topk || '6' }}"
-
-      - name: Beauty panel (signal & risk)
-        env:
-          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
-        run: |
-          python tools/make_beauty_panel.py \
-            --picklist backtests/picklist_highrsi_trend.csv \
-            --hi70 backtests/hi70_thisweek.csv \
-            --topk "${{ inputs.topk != '' && inputs.topk || '6' }}"
-
-      - name: Email weekly summary (HTML + inline charts)
-        env:
-          SMTP_HOST: smtp.gmail.com
-          SMTP_PORT: "587"
-          SMTP_USER: ${{ secrets.SMTP_USER }}
-          SMTP_PASS: ${{ secrets.SMTP_PASS }}
-          SMTP_FROM: ${{ secrets.SMTP_FROM }}
-          SMTP_TO: ${{ secrets.SMTP_TO }}
-          EMAIL_SUBJECT: "IW Bot - Weekly Picks ${{ steps.when.outputs.friday }}"
-        run: python tools/send_weekly_html.py
+            --topk "${{ env.TOPK }}"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -218,5 +170,3 @@ jobs:
             backtests/picklist_highrsi_trend.csv
             backtests/top6_preview.txt
             runner_dates.json
-            backtests/universe_topvol.txt
-            backtests/universe_topvol.csv
