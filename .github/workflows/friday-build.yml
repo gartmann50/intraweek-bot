@@ -75,9 +75,17 @@ jobs:
             --until "${{ steps.when.outputs.friday }}" \
             --out backtests/picklist_highrsi_trend.csv
 
+
       - name: Assert no local dataset present
         run: |
-          test ! -d stock_data_400 && echo "OK: no stock_data_400 directory"
+          if [ -d stock_data_400 ]; then
+            echo "ERROR: stock_data_400 exists (local data directory present)"
+            echo "Contents:"
+            ls -la stock_data_400 || true
+            exit 1
+          fi
+          echo "OK: no stock_data_400 directory"
+
 
 
 
