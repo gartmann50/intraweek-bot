@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os, math, requests
+from pathlib import Path
 
 def _base_url():
     return ("https://paper-api.alpaca.markets"
@@ -12,14 +13,29 @@ def _headers():
         "APCA-API-SECRET-KEY": os.environ["ALPACA_SECRET"]
     }
 
+def _load_allowlist(path="backtests/model_symbols.txt"):
+    p = Path(path)
+    if not p.exists():
+        print(f"[flatten] allow-list missing: {p} (will NOT flatten anything)")
+        return set()
+    syms=set()
+    for line in p.read_text().splitlines():
+        s=line.strip().upper()
+        if s and not s.startswith("#"):
+            syms.add(s)
+    return syms
+
 def _cancel_open_for_symbol(base, H, sym):
     r = requests.get(f"{base}/v2/orders", params={"status":"open","limit":500}, headers=H, timeout=20)
-    if not r.ok: return
+    if not r.ok: 
+        return
     for od in r.json():
-        if od.get("symbol") == sym:
+        if (od.get("symbol") or "").upper() == sym:
             oid = od.get("id")
-            try: requests.delete(f"{base}/v2/orders/{oid}", headers=H, timeout=10)
-            except: pass
+            try:
+                requests.delete(f"{base}/v2/orders/{oid}", headers=H, timeout=10)
+            except:
+                pass
 
 def _place_mkt(base, H, sym, side, qty, tif):
     # qty can be fractional; Alpaca accepts string numbers best
@@ -31,6 +47,13 @@ def main():
     force = os.getenv("FORCE","false").lower() == "true"
     base  = _base_url()
     H     = _headers()
+
+    # NEW: strategy-scoped allow-list (protect manual trades)
+    allow_path = os.getenv("MODEL_SYMBOLS", "backtests/model_symbols.txt")
+    allow = _load_allowlist(allow_path)
+    if not allow:
+        print("[flatten] allow-list empty/missing → refusing to flatten (protect manual trades).")
+        return
 
     r = requests.get(f"{base}/v2/positions", headers=H, timeout=20)
     if not r.ok:
@@ -45,11 +68,14 @@ def main():
     placed = errors = 0
     for p in pos:
         sym = (p.get("symbol") or "").upper()
+        if sym not in allow:
+            continue
+
         try:
             qty = float(p.get("qty") or 0)
         except:
             continue
-        if not sym or qty == 0: 
+        if not sym or qty == 0:
             continue
 
         side = "sell" if qty > 0 else "buy"
@@ -94,6 +120,7 @@ def main():
                     errors += 1
 
     print(f"Flatten summary: placed={placed}, errors={errors}, force={force}")
+    print(f"[flatten] allow-list used ({len(allow)}): {sorted(allow)}")
 
 if __name__ == "__main__":
     main()
