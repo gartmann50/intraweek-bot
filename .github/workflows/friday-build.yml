@@ -68,6 +68,11 @@ jobs:
             --until "${{ steps.when.outputs.friday }}" \
             --out backtests/picklist_highrsi_trend.csv
 
+      - name: Assert no local dataset present
+        run: |
+          test ! -d stock_data_400 && echo "OK: no stock_data_400 directory"
+
+
 
       # NEW — build dynamic universe (same thresholds as hi70)
       - name: Build universe (ADV$) with fallback
