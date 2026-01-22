@@ -3,12 +3,12 @@ name: IW Bot — Market Open
 on:
   schedule:
     # Keep Mon–Fri so a Monday market holiday still buys on Tuesday
-    - cron: "25 12 * * 1-5"   # pre-open (EST window)
-    - cron: "25 13 * * 1-5"   # pre-open (EDT window)
+    - cron: "25 12 * * 1-5"   # pre-open window during EST
+    - cron: "25 13 * * 1-5"   # pre-open window during EDT
   workflow_dispatch:
     inputs:
       force_buy:
-        description: "Force weekly buy now"
+        description: "Force weekly buy now (bypass first-session gate + dup guard)"
         type: boolean
         default: false
       topk:
@@ -25,11 +25,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      actions: read   # REQUIRED to download artifacts from other workflow runs
+      actions: read
 
     env:
-      # Single source of truth for Top-K
-      TOPK: ${{ github.event.inputs.topk != '' && github.event.inputs.topk || '6' }}
+      TOPK: ${{ github.event.inputs.topk || '6' }}
 
     steps:
       - uses: actions/checkout@v4
@@ -43,7 +42,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install pandas numpy requests
 
-      # --- Compute last Friday in New York ---
+      # --- Compute last Friday (NY) ---
       - name: When (NY)
         id: when
         shell: python
@@ -51,15 +50,17 @@ jobs:
           from datetime import datetime, timedelta
           from zoneinfo import ZoneInfo
           import os
+
           ny = ZoneInfo("America/New_York")
           now = datetime.now(ny)
           d = now.date()
           while d.weekday() != 4:
               d -= timedelta(days=1)
-          is_monday = (now.weekday() == 0)
+
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
               f.write(f"friday={d}\n")
-              f.write(f"is_monday={'true' if is_monday else 'false'}\n")
+
+          print("Anchor Friday:", d)
 
       # --- Duplicate-buy guard per week (keyed by Friday date) ---
       - name: Dup guard for this Friday
@@ -73,6 +74,7 @@ jobs:
         if: steps.opened.outputs.cache-hit == 'true' && github.event.inputs.force_buy != 'true'
         run: echo "Already opened for ${{ steps.when.outputs.friday }}; exiting." && exit 0
 
+      # --- Download weekly picks artifact (latest successful Friday Build) ---
       - name: Download weekly picks artifact (latest)
         uses: dawidd6/action-download-artifact@v2
         with:
@@ -86,17 +88,7 @@ jobs:
           path: backtests
           if_no_artifact_found: fail
 
-      - name: Download trailing stops (optional)
-        uses: dawidd6/action-download-artifact@v2
-        with:
-          workflow: friday-build.yml
-          branch: main
-          workflow_conclusion: success
-          name: ^trailing-stops-${{ steps.when.outputs.friday }}$
-          name_is_regexp: true
-          path: backtests
-          if_no_artifact_found: warn
-
+      # --- Normalize picklist path (artifact may be nested) ---
       - name: Normalize picklist path
         shell: bash
         run: |
@@ -111,35 +103,27 @@ jobs:
             fi
           done
           echo "ERROR: picklist_highrsi_trend.csv not found in downloaded artifacts"
+          echo "Found files:"
+          find backtests -maxdepth 3 -type f -print || true
           exit 1
 
       - name: Derive WEEK from picklist (export)
-        id: week
         shell: python
         run: |
           import os, pandas as pd
-          p = 'backtests/picklist_highrsi_trend.csv'
+          p = "backtests/picklist_highrsi_trend.csv"
           df = pd.read_csv(p)
-          wk = 'week_start' if 'week_start' in df.columns else ('week' if 'week' in df.columns else None)
+          wk = "week_start" if "week_start" in df.columns else ("week" if "week" in df.columns else None)
           if not wk:
-            raise SystemExit("No week column (week_start/week) in picklist.")
-          week = str(pd.to_datetime(df[wk], errors='coerce').dropna().dt.date.max())
+              raise SystemExit("No week column (week_start/week) in picklist.")
+          week = str(pd.to_datetime(df[wk], errors="coerce").dropna().dt.date.max())
           print("WEEK =", week)
-          open(os.environ['GITHUB_ENV'], 'a').write(f'WEEK={week}\n')
+          open(os.environ["GITHUB_ENV"], "a").write(f"WEEK={week}\n")
 
       - name: Sanity — show backtests/
         run: ls -Rlh backtests || true
 
-      - name: Download trailing exits (if any)
-        uses: dawidd6/action-download-artifact@v2
-        with:
-          search_artifacts: true
-          workflow: afterclose-trailing.yml
-          name: trailing-stops-${{ steps.when.outputs.friday }}
-          path: backtests
-          if_no_artifact_found: ignore
-
-      # --- Gate to U.S. open (sleep ≤2h) ---
+      # --- Gate to US open (sleep ≤2h unless forced) ---
       - name: Gate to U.S. open (sleep ≤2h)
         id: gate
         env:
@@ -150,43 +134,37 @@ jobs:
         shell: python
         run: |
           import os, time, sys, requests, datetime as dt
+
           if str(os.getenv("FORCE_BUY","false")).lower()=="true":
-              open(os.environ["GITHUB_OUTPUT"],"a").write("go=1\n"); sys.exit(0)
-          base="https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
-          H={"APCA-API-KEY-ID":os.environ["ALPACA_KEY"],"APCA-API-SECRET-KEY":os.environ["ALPACA_SECRET"]}
-          r=requests.get(f"{base}/v2/clock",headers=H,timeout=20)
-          c=r.json() if r.ok else {}
+              open(os.environ["GITHUB_OUTPUT"],"a").write("go=1\n")
+              print("FORCE_BUY=true → go=1 (bypass clock wait)")
+              sys.exit(0)
+
+          base = "https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
+          H = {"APCA-API-KEY-ID": os.environ["ALPACA_KEY"], "APCA-API-SECRET-KEY": os.environ["ALPACA_SECRET"]}
+
+          c = requests.get(f"{base}/v2/clock", headers=H, timeout=20).json()
           if c.get("is_open"):
-              open(os.environ["GITHUB_OUTPUT"],"a").write("go=1\n"); sys.exit(0)
-          if "next_open" not in c:
-              open(os.environ["GITHUB_OUTPUT"],"a").write("go=0\n"); sys.exit(0)
-          t=dt.datetime.fromisoformat(c["next_open"].replace("Z","+00:00"))
-          sec=max(0,(t-dt.datetime.now(dt.timezone.utc)).total_seconds())
-          if sec>7200:
-              open(os.environ["GITHUB_OUTPUT"],"a").write("go=0\n"); sys.exit(0)
+              open(os.environ["GITHUB_OUTPUT"],"a").write("go=1\n")
+              print("Market already open → go=1")
+              sys.exit(0)
+
+          t = dt.datetime.fromisoformat(c["next_open"].replace("Z","+00:00"))
+          sec = max(0, (t - dt.datetime.now(dt.timezone.utc)).total_seconds())
+
+          if sec > 7200:
+              open(os.environ["GITHUB_OUTPUT"],"a").write("go=0\n")
+              print("Next open is >2h away → go=0")
+              sys.exit(0)
+
+          print(f"Sleeping {int(sec)+3}s until open…")
           time.sleep(int(sec)+3)
           open(os.environ["GITHUB_OUTPUT"],"a").write("go=1\n")
 
-      - name: Execute exits at open (if any)
-        if: ${{ steps.gate.outputs.go == '1' }}
-        env:
-          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
-          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
-          ALPACA_ENV:    live
-        run: |
-          if [ -s backtests/exit_symbols.txt ]; then
-            python execute_orders.py \
-              --broker alpaca \
-              --data-dir stock_data_400 \
-              --picklist backtests/picklist_highrsi_trend.csv \
-              --week "${{ steps.when.outputs.friday }}" \
-              --side sell
-          else
-            echo "No exits."
-          fi
-
+      # --- Decide if first session after Friday (unless forced) ---
       - name: Decide if first session after Friday
         id: buygate
+        if: ${{ steps.gate.outputs.go == '1' }}
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
@@ -194,7 +172,7 @@ jobs:
           FORCE_BUY:     ${{ github.event.inputs.force_buy }}
         shell: python
         run: |
-          import os,requests,datetime as dt
+          import os, requests, datetime as dt
           from zoneinfo import ZoneInfo
 
           if str(os.getenv("FORCE_BUY","false")).lower()=="true":
@@ -202,18 +180,23 @@ jobs:
               print("force_buy=true → buygate.do=1")
               raise SystemExit(0)
 
-          base="https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
-          H={"APCA-API-KEY-ID":os.environ["ALPACA_KEY"],"APCA-API-SECRET-KEY":os.environ["ALPACA_SECRET"]}
-          friday="${{ steps.when.outputs.friday }}"
-          start=(dt.date.fromisoformat(friday)+dt.timedelta(days=1)).isoformat()
-          end  =(dt.date.fromisoformat(friday)+dt.timedelta(days=7)).isoformat()
-          cal=requests.get(f"{base}/v2/calendar",params={"start":start,"end":end},headers=H,timeout=20).json()
-          first=(cal[0]["date"] if cal else None)
-          today=dt.datetime.now(dt.timezone.utc).astimezone(ZoneInfo("America/New_York")).date().isoformat()
-          do="1" if first and today==first else "0"
-          open(os.environ["GITHUB_OUTPUT"],"a").write(f"do={do}\n")
-          print("first:",first,"today:",today,"BUY=",do)
+          base = "https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
+          H = {"APCA-API-KEY-ID": os.environ["ALPACA_KEY"], "APCA-API-SECRET-KEY": os.environ["ALPACA_SECRET"]}
 
+          friday = "${{ steps.when.outputs.friday }}"
+          start  = (dt.date.fromisoformat(friday) + dt.timedelta(days=1)).isoformat()
+          end    = (dt.date.fromisoformat(friday) + dt.timedelta(days=7)).isoformat()
+
+          cal = requests.get(f"{base}/v2/calendar", params={"start": start, "end": end}, headers=H, timeout=20).json()
+          first = (cal[0]["date"] if cal else None)
+
+          today = dt.datetime.now(dt.timezone.utc).astimezone(ZoneInfo("America/New_York")).date().isoformat()
+          do = "1" if first and today == first else "0"
+
+          open(os.environ["GITHUB_OUTPUT"],"a").write(f"do={do}\n")
+          print("first:", first, "today:", today, "BUY=", do)
+
+      # --- Prepare buy list (Top-K), skip names already held/ordered ---
       - name: Prepare buy list (Top-K) — skip names already held / ordered
         id: buylist
         if: ${{ steps.gate.outputs.go == '1' && steps.buygate.outputs.do == '1' }}
@@ -224,13 +207,13 @@ jobs:
           TOPK:          ${{ env.TOPK }}
         shell: python
         run: |
-          import os, requests, pandas as pd, pathlib as p
+          import os, requests, pandas as pd
+          from pathlib import Path
 
-          pick = p.Path("backtests/picklist_highrsi_trend.csv")
+          pick = Path("backtests/picklist_highrsi_trend.csv")
           df = pd.read_csv(pick)
+
           wkcol = "week_start" if "week_start" in df.columns else ("week" if "week" in df.columns else None)
-          if not wkcol:
-              raise SystemExit("No week column in picklist.")
           week = str(pd.to_datetime(df[wkcol], errors="coerce").dropna().dt.date.max())
 
           if "rank" in df.columns:
@@ -239,112 +222,46 @@ jobs:
               df = df.sort_values(["score","symbol"], ascending=[False,True])
 
           topk = int(os.getenv("TOPK","6"))
-          picks = (df[pd.to_datetime(df[wkcol], errors="coerce").dt.date.astype(str)==week]["symbol"]
-                      .dropna().astype(str).head(topk).tolist())
+          picks = (df[pd.to_datetime(df[wkcol], errors="coerce").dt.date.astype(str) == week]["symbol"]
+                    .dropna().astype(str).head(topk).tolist())
 
           base = "https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
           H = {"APCA-API-KEY-ID": os.environ["ALPACA_KEY"], "APCA-API-SECRET-KEY": os.environ["ALPACA_SECRET"]}
 
-          held=set()
-          r=requests.get(f"{base}/v2/positions", headers=H, timeout=15)
-          if r.status_code==200:
+          # held positions
+          held = set()
+          r = requests.get(f"{base}/v2/positions", headers=H, timeout=20)
+          if r.status_code == 200:
               for pos in (r.json() or []):
-                  q=float(pos.get("qty") or 0)
-                  if abs(q)>0: held.add((pos.get("symbol") or "").upper())
+                  q = float(pos.get("qty") or 0)
+                  if abs(q) > 0:
+                      held.add((pos.get("symbol") or "").upper())
 
-          buying=set()
-          r=requests.get(f"{base}/v2/orders", params={"status":"open","limit":500}, headers=H, timeout=15)
-          if r.status_code==200:
+          # open buy orders
+          buying = set()
+          r = requests.get(f"{base}/v2/orders", params={"status":"open","limit":500}, headers=H, timeout=20)
+          if r.status_code == 200:
               for od in (r.json() or []):
-                  if (od.get("side")=="buy") and od.get("symbol"):
+                  if od.get("side") == "buy" and od.get("symbol"):
                       buying.add(od["symbol"].upper())
 
-          filtered=[s.upper() for s in picks if s.upper() not in held and s.upper() not in buying]
+          filtered = [s for s in picks if s.upper() not in held and s.upper() not in buying]
 
-          p.Path("backtests").mkdir(exist_ok=True)
-          open("backtests/buy_symbols.txt","w").write("\n".join(filtered) + ("\n" if filtered else ""))
+          Path("backtests").mkdir(exist_ok=True)
+          Path("backtests/buy_symbols.txt").write_text("\n".join(filtered), encoding="utf-8")
 
           any_buy = "1" if filtered else "0"
+          print("WEEK:", week)
           print("TopK:", picks)
           print("Held:", sorted(held))
           print("Open buys:", sorted(buying))
-          print("Filtered to:", filtered)
+          print("Filtered:", filtered)
+
           open(os.environ["GITHUB_OUTPUT"],"a").write(f"any={any_buy}\n")
 
-      - name: Preflight Top-K before buying (why/why-not)
-        if: ${{ steps.gate.outputs.go == '1' && steps.buygate.outputs.do == '1' }}
-        env:
-          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
-          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
-          ALPACA_ENV:    live
-          NOTIONAL_PER:  "5000"
-          TOPK:          ${{ env.TOPK }}
-          WEEK:          ${{ env.WEEK }}
-        shell: python
-        run: |
-          import os, sys, glob, pathlib, requests, pandas as pd
-          data_dir = "stock_data_400"
-          pick = pathlib.Path("backtests/picklist_highrsi_trend.csv")
-          if not pick.exists():
-              print("ERROR: picklist missing:", pick); sys.exit(78)
-
-          df = pd.read_csv(pick)
-          wkcol = "week_start" if "week_start" in df.columns else ("week" if "week" in df.columns else None)
-          if not wkcol:
-              print("ERROR: no week column in picklist"); sys.exit(1)
-
-          week = os.environ.get("WEEK") or str(pd.to_datetime(df[wkcol], errors="coerce").dropna().dt.date.max())
-          print("Chosen WEEK:", week)
-
-          k = int(os.getenv("TOPK", "6"))
-          sel = df[pd.to_datetime(df[wkcol], errors="coerce").dt.date.astype(str) == week].copy()
-          if "rank" in sel.columns: sel = sel.sort_values(["rank","symbol"], ascending=[True,True])
-          elif "score" in sel.columns: sel = sel.sort_values(["score","symbol"], ascending=[False,True])
-          picks = sel["symbol"].dropna().astype(str).head(k).tolist()
-          print("Top-K:", picks)
-          if not picks:
-              print("No picks for WEEK → nothing to buy."); sys.exit(0)
-
-          base = "https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
-          H = {"APCA-API-KEY-ID": os.environ["ALPACA_KEY"], "APCA-API-SECRET-KEY": os.environ["ALPACA_SECRET"]}
-          r = requests.get(f"{base}/v2/clock", headers=H, timeout=20)
-          is_open = (r.status_code == 200 and (r.json() or {}).get("is_open", False))
-          print("Alpaca clock is_open:", is_open)
-
-          def last_close(sym):
-              for p in sorted(glob.glob(f"{data_dir}/{sym}*.csv")):
-                  try:
-                      d = pd.read_csv(p, usecols=[0,4])  # Date, Close
-                      if len(d): return float(d.iloc[-1,1])
-                  except Exception:
-                      pass
-              return None
-
-          notional = float(os.getenv("NOTIONAL_PER","0") or 0)
-          print(f"Notional per name: {notional:,.2f} USD")
-
-          for s in picks:
-              a = requests.get(f"{base}/v2/assets/{s}", headers=H, timeout=20)
-              tradable, frac = False, False
-              if a.status_code == 200:
-                  aj = a.json() or {}
-                  tradable = bool(aj.get("tradable", False))
-                  frac     = bool(aj.get("fractionable", False))
-              lc = last_close(s)
-              reasons = []
-              if not tradable: reasons.append("NOT_TRADABLE")
-              if not frac and lc is not None and notional < lc: reasons.append(f"NOT_FRACTIONABLE & notional<{lc:.2f}")
-              if lc is None: reasons.append("NO_LOCAL_EOD")
-              if reasons:
-                  print(f"- {s}: SKIP → {', '.join(reasons)}")
-              else:
-                  print(f"- {s}: OK (tradable={tradable}, fractionable={frac}, last_close={lc})")
-
-          if not is_open:
-              print("NOTE: Market is closed; Alpaca will reject DAY market orders. We gated earlier, but FYI.")
-
+      # --- Place weekly buys (API-only) ---
       - name: Buy once (weekly allow-list, safe notional)
-        if: ${{ steps.gate.outputs.go == '1' && (steps.buygate.outputs.do == '1' || github.event.inputs.force_buy == 'true') && steps.buylist.outputs.any == '1' }}
+        if: ${{ steps.gate.outputs.go == '1' && steps.buygate.outputs.do == '1' && steps.buylist.outputs.any == '1' }}
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
@@ -352,35 +269,18 @@ jobs:
           NOTIONAL_PER:  "5000"
         run: python tools/place_weekly_buys.py
 
-      # NEW: publish allow-list for Friday flatten (protect manual trades)
+      # --- Upload model allow-list and report (if present) ---
       - name: Upload model allow-list (symbols opened by model)
-        if: ${{ always() }}
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: momo-positions-${{ steps.when.outputs.friday }}
+          name: model-allowlist-${{ steps.when.outputs.friday }}
           path: |
             backtests/model_symbols.txt
             backtests/buy_exec_report.csv
+          if-no-files-found: warn
 
-      - name: Ensure stops now (ATR14 × 1.75, GTC)
-        if: ${{ steps.gate.outputs.go == '1' && (steps.buygate.outputs.do == '1' || github.event.inputs.force_buy == 'true') && steps.buylist.outputs.any == '1' }}
-        env:
-          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
-          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
-          ALPACA_ENV:    live
-          ATR_WIN:       "14"
-          ATR_MULT:      "1.75"
-        run: python tools/ensure_stops.py
-
-      # FIX: This step was mistakenly calling moc_flatten.py
-      - name: Show Alpaca positions (live)
-        if: always()
-        env:
-          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
-          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
-          ALPACA_ENV:    live
-        run: python tools/open_positions.py
-
+      # Mark as opened so this week won't buy again (unless force_buy)
       - name: Mark opened
-        if: ${{ steps.gate.outputs.go == '1' && (steps.buygate.outputs.do == '1' || github.event.inputs.force_buy == 'true') && steps.buylist.outputs.any == '1' }}
+        if: ${{ steps.gate.outputs.go == '1' && steps.buygate.outputs.do == '1' && steps.buylist.outputs.any == '1' }}
         run: mkdir -p .open-flag && date > .open-flag/ok
