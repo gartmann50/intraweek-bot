@@ -30,6 +30,13 @@ jobs:
       TOPK:  ${{ inputs.topk != '' && inputs.topk || '6' }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Hard remove any local dataset dir
+        run: |
+          rm -rf stock_data_400
+          echo "Removed stock_data_400 if present"
+
+      
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
       - run: |
