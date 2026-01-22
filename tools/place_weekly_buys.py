@@ -33,7 +33,6 @@ ALPACA_KEY    = os.environ.get("ALPACA_KEY", "")
 ALPACA_SECRET = os.environ.get("ALPACA_SECRET", "")
 ALPACA_ENV    = os.environ.get("ALPACA_ENV", "paper").lower()
 NOTIONAL_PER  = float(os.environ.get("NOTIONAL_PER", "0") or "0")
-DATA_DIR      = os.environ.get("DATA_DIR", "stock_data_400")
 
 HEADERS = {
     "APCA-API-KEY-ID": ALPACA_KEY,
@@ -83,24 +82,8 @@ def alpaca_latest_quote_mid(sym: str) -> Optional[float]:
         print(f"[price] quote err {sym}: {e}")
     return None
 
-def local_last_close(sym: str) -> Optional[float]:
-    try:
-        files = sorted(glob.glob(f"{DATA_DIR}/{sym}*.csv"))
-        for fp in files:
-            try:
-                df = pd.read_csv(fp, usecols=[0,4])  # Date, Close
-                if len(df):
-                    v = float(df.iloc[-1,1])
-                    if v > 0:
-                        return v
-            except Exception:
-                pass
-    except Exception as e:
-        print(f"[price] local err {sym}: {e}")
-    return None
-
 def resolve_price(sym: str) -> Optional[float]:
-    for fn in (alpaca_latest_trade, alpaca_latest_quote_mid, local_last_close):
+   for fn in (alpaca_latest_trade, alpaca_latest_quote_mid) :
         p = fn(sym)
         if p and p > 0:
             return float(p)
