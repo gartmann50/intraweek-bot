@@ -14,7 +14,6 @@ on:
         description: "Optional comma-separated 70D tickers to include (testing only)"
         required: false
         default: ""
-        
 
 concurrency:
   group: iwbot-friday-build
@@ -25,28 +24,30 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      actions: read   # <— required to download artifacts from other workflow runs
+      actions: read   # required to download artifacts from other workflow runs
     env:
-      TOPK:  ${{ inputs.topk != '' && inputs.topk || '6' }}
+      TOPK: ${{ inputs.topk != '' && inputs.topk || '6' }}
+
     steps:
       - uses: actions/checkout@v4
 
+      # Belt & suspenders: ensure no local dataset dir exists
       - name: Hard remove any local dataset dir
         run: |
           rm -rf stock_data_400
           echo "Removed stock_data_400 if present"
 
-      
       - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
-      - run: |
+        with:
+          python-version: "3.11"
+
+      - name: Install deps
+        env:
+          MPLBACKEND: Agg
+        run: |
           python -m pip install --upgrade pip
           pip install --upgrade pandas numpy pyyaml requests matplotlib pillow
-        env:
-           MPLBACKEND: Agg     # safe default backend
-  
 
-          
       - name: Compute last Friday (Europe/Oslo)
         id: when
         shell: python
@@ -60,38 +61,12 @@ jobs:
               json.dump({"friday":now.isoformat(),"monday":mon},f)
           with open(os.environ["GITHUB_OUTPUT"],"a") as g:
               g.write(f"friday={now}\n")
-              g.write(f"monday={mon}\n")   # <-- add this line
-      
+              g.write(f"monday={mon}\n")
+
       - name: Export WEEK (nominal Monday) for later steps
         run: echo "WEEK=${{ steps.when.outputs.monday }}" >> $GITHUB_ENV
 
-      
-      - name: Build picklist (API, no local data)
-        env:
-          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
-        run: |
-          python build_picklist_parametric.py \
-            --symbols-file backtests/universe_topvol.txt \
-            --rsi-min 68 --max-ext20 0.15 --top-per-week 40 \
-            --until "${{ steps.when.outputs.friday }}" \
-            --lookback-days 45 \
-            --out backtests/picklist_highrsi_trend.csv
-
-
-      - name: Assert no local dataset present
-        run: |
-          if [ -d stock_data_400 ]; then
-            echo "ERROR: stock_data_400 exists (local data directory present)"
-            echo "Contents:"
-            ls -la stock_data_400 || true
-            exit 1
-          fi
-          echo "OK: no stock_data_400 directory"
-
-
-
-
-      # NEW — build dynamic universe (same thresholds as hi70)
+      # Build dynamic universe (ADV$) once (shared by picklist + hi70 filter)
       - name: Build universe (ADV$) with fallback
         env:
           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
@@ -114,13 +89,33 @@ jobs:
               --out-dir backtests
             echo "[fallback] new size: $(wc -l < backtests/universe_topvol.txt)"
           fi
-      
+
+          echo "[universe] head:"
           sed -n '1,8p' backtests/universe_topvol.csv
 
+      # API-only picklist (requires your updated build_picklist_parametric.py)
+      - name: Build picklist (API, no local data)
+        env:
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+        run: |
+          python build_picklist_parametric.py \
+            --symbols-file backtests/universe_topvol.txt \
+            --rsi-min 68 --max-ext20 0.15 --top-per-week 40 \
+            --until "${{ steps.when.outputs.friday }}" \
+            --lookback-days 45 \
+            --out backtests/picklist_highrsi_trend.csv
 
+      - name: Assert no local dataset present
+        run: |
+          if [ -d stock_data_400 ]; then
+            echo "ERROR: stock_data_400 exists (local data directory present)"
+            echo "Contents:"
+            ls -la stock_data_400 || true
+            exit 1
+          fi
+          echo "OK: no stock_data_400 directory"
 
-
-      - name: Filter:light short-term trend (no ≥2 consecutive down weeks)
+      - name: Filter: light short-term trend (no ≥2 consecutive down weeks)
         env:
           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
         run: |
@@ -132,8 +127,7 @@ jobs:
             --max-consecutive-down 1 \
             --down-eps 0.002
 
-      
-      # NEW — filter picklist to that universe (no ranking changes)
+      # Keep picklist inside the same universe (no ranking changes)
       - name: Filter picklist by dynamic universe
         run: |
           python tools/filter_picklist_by_symbols.py \
@@ -141,11 +135,10 @@ jobs:
             backtests/picklist_highrsi_trend.csv \
             backtests/picklist_highrsi_trend.csv
 
-
       - name: Preview Top-K (save file)
         run: |
           set -e
-           python preview_top6.py \
+          python preview_top6.py \
             --picklist backtests/picklist_highrsi_trend.csv \
             --topk "${{ inputs.topk != '' && inputs.topk || '6' }}" \
             --week "${{ steps.when.outputs.friday }}" \
@@ -156,14 +149,14 @@ jobs:
         uses: dawidd6/action-download-artifact@v2
         with:
           repo: ${{ github.repository }}
-          workflow: hi70-scan.yml           # the workflow that builds the 70D-highs artifact
+          workflow: hi70-scan.yml
           workflow_conclusion: success
           branch: main
           name_is_regexp: true
-          name: ^hi70-.*$                   # match any hi70-* artifact name
+          name: ^hi70-.*$
           path: backtests
           allow_forks: true
-          if_no_artifact_found: warn        # <- don't fail the job if it’s missing
+          if_no_artifact_found: warn
 
       - name: Probe hi70 artifact contents
         shell: bash
@@ -197,7 +190,6 @@ jobs:
             echo "[hi70] CSV not found."
           fi
 
-
       - name: Filter hi70 results to shared universe
         if: env.HI70_CSV != ''
         run: |
@@ -207,7 +199,6 @@ jobs:
             "$HI70_CSV"
           sed -n '1,12p' "$HI70_CSV"
 
-      
       - name: Build mini-charts + HTML
         env:
           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
@@ -218,7 +209,6 @@ jobs:
             --hi70     backtests/hi70_thisweek.csv \
             --topk     ${{ inputs.topk != '' && inputs.topk || '6' }}
 
-
       - name: Beauty panel (signal & risk)
         env:
           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
@@ -227,7 +217,6 @@ jobs:
             --picklist backtests/picklist_highrsi_trend.csv \
             --hi70     backtests/hi70_thisweek.csv \
             --topk     ${{ inputs.topk != '' && inputs.topk || '6' }}
-
 
       - name: Email weekly summary (HTML + inline charts)
         env:
@@ -240,9 +229,6 @@ jobs:
           EMAIL_SUBJECT: "IW Bot — Weekly Picks ${{ steps.when.outputs.friday }}"
         run: python tools/send_weekly_html.py
 
-
-
-      
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -251,3 +237,5 @@ jobs:
             backtests/picklist_highrsi_trend.csv
             backtests/top6_preview.txt
             runner_dates.json
+            backtests/universe_topvol.txt
+            backtests/universe_topvol.csv
