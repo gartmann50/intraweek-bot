@@ -16,6 +16,7 @@ Inputs:
   backtests/buy_symbols.txt  (one symbol per line)
 Outputs:
   backtests/buy_exec_report.csv
+  backtests/model_symbols.txt   <-- NEW: symbols successfully placed by this model
 """
 
 import os, sys, json, glob, math, time
@@ -146,10 +147,15 @@ def main():
     symbols = read_buy_symbols()
     if not symbols:
         print("[buy] no symbols to buy; exit 0")
+        Path("backtests/model_symbols.txt").write_text("")  # NEW: keep file present
         return
 
     rows = []
     placed = 0
+
+    # NEW: track symbols successfully submitted by this model
+    model_syms: List[str] = []
+
     for s in symbols:
         price = resolve_price(s)
         if not price or price <= 0:
@@ -175,8 +181,16 @@ def main():
             "price_used": price, "qty": qty, "order_id": oid,
             "fractionable": fractionable
         })
-        if ok: placed += 1
+        if ok:
+            placed += 1
+            model_syms.append(s)  # NEW
         time.sleep(0.2)  # be polite
+
+    # NEW: write allow-list for Friday flatten to use
+    Path("backtests/model_symbols.txt").write_text(
+        "\n".join(sorted(set(model_syms))) + ("\n" if model_syms else "")
+    )
+    print("[buy] model_symbols.txt:", sorted(set(model_syms)))
 
     df = pd.DataFrame(rows)
     df.to_csv("backtests/buy_exec_report.csv", index=False)
