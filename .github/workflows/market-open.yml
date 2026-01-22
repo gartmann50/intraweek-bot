@@ -350,7 +350,6 @@ jobs:
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
           ALPACA_ENV:    live
           NOTIONAL_PER:  "5000"
-          DATA_DIR:      stock_data_400
         run: python tools/place_weekly_buys.py
 
       # NEW: publish allow-list for Friday flatten (protect manual trades)
