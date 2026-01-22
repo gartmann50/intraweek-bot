@@ -59,20 +59,15 @@ jobs:
         run: echo "WEEK=${{ steps.when.outputs.monday }}" >> $GITHUB_ENV
 
       
-      
-      - name: Cache dataset between runs
-        uses: actions/cache@v4
-        with:
-          path: stock_data_400
-          key: polygon-dataset-${{ steps.when.outputs.friday }}
-          restore-keys: polygon-dataset-
-      - name: Fetch dataset + build picklist
+      - name: Build picklist (API, no local data)
+        env:
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
         run: |
           python build_picklist_parametric.py \
-            --data-dir stock_data_400 \
             --rsi-min 68 --max-ext20 0.15 --top-per-week 40 \
             --until "${{ steps.when.outputs.friday }}" \
             --out backtests/picklist_highrsi_trend.csv
+
 
       # NEW — build dynamic universe (same thresholds as hi70)
       - name: Build universe (ADV$) with fallback
