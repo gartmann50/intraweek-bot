@@ -2,8 +2,8 @@ name: IW Bot — Friday Flatten (MOC) — Momentum Only
 
 on:
   schedule:
-    - cron: "45 19 * * 5"   # close in EDT
-    - cron: "45 20 * * 5"   # close in EST
+    - cron: "45 19 * * 5"   # close in EDT (NYC summer)
+    - cron: "45 20 * * 5"   # close in EST (NYC winter)
   workflow_dispatch:
     inputs:
       force:
@@ -25,6 +25,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -41,11 +42,12 @@ jobs:
           from datetime import datetime, timedelta
           from zoneinfo import ZoneInfo
           import os
-          ny=ZoneInfo("America/New_York")
-          d=datetime.now(ny).date()
-          while d.weekday()!=4:
+          ny = ZoneInfo("America/New_York")
+          d = datetime.now(ny).date()
+          while d.weekday() != 4:
               d -= timedelta(days=1)
-          open(os.environ["GITHUB_OUTPUT"],"a").write(f"friday={d}\n")
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"friday={d}\n")
           print("Anchor Friday:", d)
 
       - name: Download weekly lots artifact (for this Friday)
@@ -65,7 +67,7 @@ jobs:
         run: |
           ls -Rlh backtests || true
           echo "=== momentum_lots.csv ==="
-          sed -n '1,30p' backtests/momentum_lots.csv || true
+          sed -n '1,40p' backtests/momentum_lots.csv || true
 
       - name: Show Alpaca positions BEFORE
         run: python tools/open_positions.py
