@@ -162,6 +162,21 @@ jobs:
             --picklist backtests/picklist_highrsi_trend.csv \
             --topk "${{ env.TOPK }}"
 
+      -  name: Email weekly summary (HTML + inline charts)
+         env:
+            SMTP_HOST: smtp.gmail.com
+            SMTP_PORT: "587"
+            SMTP_USER: ${{ secrets.SMTP_USER }}
+            SMTP_PASS: ${{ secrets.SMTP_PASS }}
+            SMTP_FROM: ${{ secrets.SMTP_FROM }}
+            SMTP_TO:   ${{ secrets.SMTP_TO }}
+            EMAIL_SUBJECT: "IW Bot — Weekly Picks ${{ steps.when.outputs.friday }}"
+         run: |
+            python tools/send_weekly_html.py
+
+
+
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
