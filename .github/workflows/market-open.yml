@@ -2,6 +2,7 @@ name: IW Bot — Market Open
 
 on:
   schedule:
+    # Keep Mon–Fri so a Monday market holiday still buys on Tuesday
     - cron: "25 12 * * 1-5"   # pre-open window during EST
     - cron: "25 13 * * 1-5"   # pre-open window during EDT
   workflow_dispatch:
@@ -83,7 +84,7 @@ jobs:
           path: backtests
           if_no_artifact_found: fail
 
-      # --- Normalize picklist path ---
+      # --- Normalize picklist path (artifact may be nested) ---
       - name: Normalize picklist path
         shell: bash
         run: |
@@ -101,8 +102,8 @@ jobs:
           find backtests -maxdepth 3 -type f -print || true
           exit 1
 
-      # --- Ensure breakout list exists (optional; we skip breakout buys if missing) ---
-      - name: Locate breakout_symbols.txt (optional)
+      # --- Normalize breakout symbols (optional; breakout will be skipped if missing) ---
+      - name: Normalize breakout symbols (optional)
         id: brk
         shell: bash
         run: |
@@ -112,11 +113,10 @@ jobs:
             cp -f "$f" backtests/breakout_symbols.txt
             echo "found=1" >> "$GITHUB_OUTPUT"
             echo "Breakout list found: $f"
-            echo "Head:"
-            sed -n '1,12p' backtests/breakout_symbols.txt || true
+            sed -n '1,15p' backtests/breakout_symbols.txt || true
           else
             echo "found=0" >> "$GITHUB_OUTPUT"
-            echo "No breakout_symbols.txt found in artifacts (breakout buys will be skipped)."
+            echo "No breakout_symbols.txt found in weekly artifact (breakout buys will be skipped)."
           fi
 
       - name: Derive WEEK from picklist (export)
@@ -153,18 +153,18 @@ jobs:
 
           base = "https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
           H = {"APCA-API-KEY-ID": os.environ["ALPACA_KEY"], "APCA-API-SECRET-KEY": os.environ["ALPACA_SECRET"]}
-          c = requests.get(f"{base}/v2/clock", headers=H, timeout=20).json()
 
+          c = requests.get(f"{base}/v2/clock", headers=H, timeout=20).json()
           if c.get("is_open"):
               open(os.environ["GITHUB_OUTPUT"],"a").write("go=1\n")
-              print("Market open → go=1")
+              print("Market already open → go=1")
               sys.exit(0)
 
           t = dt.datetime.fromisoformat(c["next_open"].replace("Z","+00:00"))
           sec = max(0, (t - dt.datetime.now(dt.timezone.utc)).total_seconds())
           if sec > 7200:
               open(os.environ["GITHUB_OUTPUT"],"a").write("go=0\n")
-              print("Next open >2h away → go=0")
+              print("Next open is >2h away → go=0")
               sys.exit(0)
 
           print(f"Sleeping {int(sec)+3}s until open…")
@@ -199,13 +199,16 @@ jobs:
 
           cal = requests.get(f"{base}/v2/calendar", params={"start": start, "end": end}, headers=H, timeout=20).json()
           first = (cal[0]["date"] if cal else None)
-          today = dt.datetime.now(dt.timezone.utc).astimezone(ZoneInfo("America/New_York")).date().isoformat()
 
+          today = dt.datetime.now(dt.timezone.utc).astimezone(ZoneInfo("America/New_York")).date().isoformat()
           do = "1" if first and today == first else "0"
+
           open(os.environ["GITHUB_OUTPUT"],"a").write(f"do={do}\n")
           print("first:", first, "today:", today, "BUY=", do)
 
-      # ========== MOMENTUM ==========
+      # ======================
+      # MOMENTUM BUY LIST
+      # ======================
       - name: Prepare MOMENTUM buy list (Top-K) — skip held / open buys
         id: momlist
         if: ${{ steps.gate.outputs.go == '1' && steps.buygate.outputs.do == '1' }}
@@ -221,6 +224,7 @@ jobs:
 
           pick = Path("backtests/picklist_highrsi_trend.csv")
           df = pd.read_csv(pick)
+
           wkcol = "week_start" if "week_start" in df.columns else ("week" if "week" in df.columns else None)
           week = str(pd.to_datetime(df[wkcol], errors="coerce").dropna().dt.date.max())
 
@@ -260,7 +264,7 @@ jobs:
           print("Filtered momentum:", filtered)
           open(os.environ["GITHUB_OUTPUT"],"a").write(f"any={any_buy}\n")
 
-      - name: Execute MOMENTUM buys ($5k each)
+      - name: Execute MOMENTUM buys ($5k each) + write lots
         if: ${{ steps.gate.outputs.go == '1' && steps.buygate.outputs.do == '1' && steps.momlist.outputs.any == '1' }}
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
@@ -273,8 +277,10 @@ jobs:
           STRATEGY:      "momentum"
         run: python tools/place_weekly_buys.py
 
-      # ========== BREAKOUT ==========
-      # Breakout can overlap momentum: we DO NOT filter out held positions.
+      # ======================
+      # BREAKOUT BUY LIST
+      # ======================
+      # Breakout can overlap momentum: we DO NOT skip held positions (so overlap doubles).
       - name: Prepare BREAKOUT buy list (Top 6 by market cap) — skip only open buys
         id: brklist
         if: ${{ steps.gate.outputs.go == '1' && steps.buygate.outputs.do == '1' && steps.brk.outputs.found == '1' }}
@@ -287,9 +293,8 @@ jobs:
           import os, requests
           from pathlib import Path
 
-          # breakout_symbols.txt must already be sorted by market cap desc (from Friday Build)
-          syms=[s.strip().upper() for s in Path("backtests/breakout_symbols.txt").read_text().splitlines() if s.strip()]
-          syms=syms[:6]
+          syms=[s.strip().upper() for s in Path("backtests/breakout_symbols.txt").read_text(encoding="utf-8").splitlines() if s.strip()]
+          syms = syms[:6]
 
           base = "https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
           H = {"APCA-API-KEY-ID": os.environ["ALPACA_KEY"], "APCA-API-SECRET-KEY": os.environ["ALPACA_SECRET"]}
@@ -309,7 +314,7 @@ jobs:
           print("Filtered breakout:", filtered)
           open(os.environ["GITHUB_OUTPUT"],"a").write(f"any={any_buy}\n")
 
-      - name: Execute BREAKOUT buys ($5k each)
+      - name: Execute BREAKOUT buys ($5k each) + write lots
         if: ${{ steps.gate.outputs.go == '1' && steps.buygate.outputs.do == '1' && steps.brklist.outputs.any == '1' }}
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
@@ -331,8 +336,10 @@ jobs:
           path: |
             backtests/momentum_lots.csv
             backtests/breakout_lots.csv
+            backtests/buy_exec_report.csv
           if-no-files-found: warn
 
+      # Mark as opened so this week won't buy again (unless force_buy)
       - name: Mark opened
         if: ${{ steps.gate.outputs.go == '1' && steps.buygate.outputs.do == '1' && (steps.momlist.outputs.any == '1' || steps.brklist.outputs.any == '1') }}
         run: mkdir -p .open-flag && date > .open-flag/ok
