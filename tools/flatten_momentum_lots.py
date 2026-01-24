@@ -38,20 +38,19 @@ def main():
     lots_csv = os.getenv("LOTS_CSV","backtests/momentum_lots.csv")
 
     df = pd.read_csv(lots_csv)
-    if week_friday:
+    if week_friday and "week_friday" in df.columns:
         df = df[df["week_friday"].astype(str) == week_friday]
 
-    # Aggregate qty per symbol (momentum lots)
     lots = df.groupby("symbol", as_index=False)["qty"].sum()
     if lots.empty:
         print("No momentum lots found for week; nothing to flatten.")
         return 0
 
-    # Current positions map
     r = requests.get(f"{base}/v2/positions", headers=H, timeout=20)
     if not r.ok:
         print("positions error", r.status_code, r.text[:300])
         return 2
+
     pos_map = {}
     for p in (r.json() or []):
         sym = (p.get("symbol") or "").upper()
@@ -74,7 +73,6 @@ def main():
             print(f"[skip] {sym}: no position (already flat).")
             continue
 
-        # Sell only up to current long qty (this bot expects longs; extend if you short)
         qty_to_close = min(want, abs(cur))
         side = "sell" if cur > 0 else "buy"
 
@@ -89,7 +87,6 @@ def main():
                 print(f"FORCE error {sym}: {rr.status_code} {rr.text[:240]}")
                 errors += 1
         else:
-            # MOC requires integer qty
             int_qty = int(math.floor(qty_to_close + 1e-8))
             frac = qty_to_close - int_qty
 
@@ -102,7 +99,6 @@ def main():
                     print(f"MOC error {sym}: {rr.status_code} {rr.text[:240]}")
                     errors += 1
 
-            # If fractional exists (unlikely since we buy whole shares), close with DAY
             if frac > 1e-6:
                 rr = _place_mkt(base, H, sym, side, frac, "day")
                 if rr.ok:
