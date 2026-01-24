@@ -1,14 +1,13 @@
-name: IW Bot — Friday Flatten (MOC)
+name: IW Bot — Friday Flatten (MOC) — Momentum Only
 
 on:
   schedule:
-    # ~10 minutes before close (UTC times; adjust if you want 50 instead of 45)
-    - cron: "45 19 * * 5"   # close in EDT (NYC summer)
-    - cron: "45 20 * * 5"   # close in EST (NYC winter)
+    - cron: "45 19 * * 5"   # close in EDT
+    - cron: "45 20 * * 5"   # close in EST
   workflow_dispatch:
     inputs:
       force:
-        description: "Flatten immediately (market DAY) instead of MOC)"
+        description: "Flatten immediately (DAY) instead of MOC"
         required: true
         type: boolean
         default: false
@@ -20,70 +19,72 @@ concurrency:
 jobs:
   flat:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
       - name: Install deps
-        run: python -m pip install --upgrade pip requests
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas requests
 
-      # --- Inspect current open positions (clean, no inline heredoc) ---
-      - name: Show Alpaca positions (paper)
+      - name: Compute last Friday (NY)
+        id: when
+        shell: python
+        run: |
+          from datetime import datetime, timedelta
+          from zoneinfo import ZoneInfo
+          import os
+          ny=ZoneInfo("America/New_York")
+          d=datetime.now(ny).date()
+          while d.weekday()!=4:
+              d -= timedelta(days=1)
+          open(os.environ["GITHUB_OUTPUT"],"a").write(f"friday={d}\n")
+          print("Anchor Friday:", d)
+
+      - name: Download weekly lots artifact (for this Friday)
+        uses: dawidd6/action-download-artifact@v2
+        with:
+          repo: ${{ github.repository }}
+          workflow: market-open.yml
+          branch: main
+          workflow_conclusion: success
+          search_artifacts: true
+          name_is_regexp: true
+          name: ^iw-lots-${{ steps.when.outputs.friday }}$
+          path: backtests
+          if_no_artifact_found: fail
+
+      - name: Sanity — show downloaded lots
+        run: |
+          ls -Rlh backtests || true
+          echo "=== momentum_lots.csv ==="
+          sed -n '1,30p' backtests/momentum_lots.csv || true
+
+      - name: Show Alpaca positions BEFORE
         run: python tools/open_positions.py
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
           ALPACA_ENV:    live
 
-      # --- Place MOC orders on Friday. When launched manually with force=true, run anyway. ---
-      - name: Flatten with MOC (scheduled run)
-        if: ${{ github.event_name == 'schedule' }}
-        run: python tools/moc_flatten.py
+      - name: Flatten MOMENTUM qty only (MOC on schedule; DAY if forced)
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
           ALPACA_ENV:    live
+          FORCE:         ${{ inputs.force }}
+          WEEK_FRIDAY:   ${{ steps.when.outputs.friday }}
+          LOTS_CSV:      backtests/momentum_lots.csv
+        run: python tools/flatten_momentum_lots.py
 
-      - name: Cancel all open orders (safety before flatten)
-        env:
-          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
-          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
-          ALPACA_ENV:    live
-        shell: python
-        run: |
-          import os, time, requests
-          base = "https://paper-api.alpaca.markets" if os.getenv("ALPACA_ENV","paper").startswith("paper") else "https://api.alpaca.markets"
-          H = {"APCA-API-KEY-ID": os.environ["ALPACA_KEY"], "APCA-API-SECRET-KEY": os.environ["ALPACA_SECRET"]}
-      
-          # Cancel all open orders
-          r = requests.delete(f"{base}/v2/orders", headers=H, timeout=20)
-          print("cancel open orders status:", r.status_code)
-      
-          # Wait until the cancels settle (keeps flatten from racing)
-          for _ in range(10):
-              q = requests.get(f"{base}/v2/orders", params={"status":"open","limit":1}, headers=H, timeout=20).json()
-              if not q:
-                  print("no open orders remaining."); break
-              time.sleep(1.0)
-
-
-      - name: Flatten positions (MOC on schedule; DAY if forced)
-        env:
-          ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
-          ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
-          ALPACA_ENV:    live
-          FORCE:         ${{ inputs.force }}   # true when you tick the checkbox
-        run: python tools/flatten_positions.py
-
-
-      # --- (Optional) show positions again after MOC so you see the effect in logs ---
-      - name: Show positions after MOC (paper)
+      - name: Show Alpaca positions AFTER
         if: always()
         run: python tools/open_positions.py
         env:
