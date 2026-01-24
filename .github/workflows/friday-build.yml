@@ -30,7 +30,9 @@ jobs:
 
       # --- Safety: ensure NO local datasets ever ---
       - name: Remove any local dataset dir
-        run: rm -rf stock_data_400
+        run: |
+          rm -rf stock_data_400
+          echo "Removed stock_data_400 if present"
 
       - uses: actions/setup-python@v5
         with:
@@ -39,11 +41,11 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy requests pyyaml matplotlib pillow
+          pip install --upgrade pandas numpy requests pyyaml matplotlib pillow
         env:
           MPLBACKEND: Agg
 
-      # --- Compute Friday anchor ---
+      # --- Compute Friday anchor (Europe/Oslo) ---
       - name: Compute last Friday (Europe/Oslo)
         id: when
         shell: python
@@ -69,7 +71,7 @@ jobs:
       - name: Export WEEK
         run: echo "WEEK=${{ steps.when.outputs.monday }}" >> $GITHUB_ENV
 
-      # --- Build dynamic universe ONCE ---
+      # --- Build dynamic universe (ADV$) with fallback ---
       - name: Build universe (ADV$) with fallback
         env:
           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
@@ -81,22 +83,28 @@ jobs:
             --min-price 5 \
             --out-dir backtests
 
-          N=$(wc -l < backtests/universe_topvol.txt)
+          N=$(wc -l < backtests/universe_topvol.txt || echo 0)
           echo "[universe] size=$N"
 
           if [ "$N" -lt 800 ]; then
+            echo "[fallback] universe too small ($N) — loosening thresholds"
             python tools/make_universe_topvol.py \
               --adv-days 21 \
               --topvol 1200 \
               --min-price 3 \
               --out-dir backtests
+            echo "[fallback] new size=$(wc -l < backtests/universe_topvol.txt || echo 0)"
           fi
 
-      # --- Build picklist (API ONLY) ---
+          echo "[universe] head:"
+          sed -n '1,12p' backtests/universe_topvol.txt || true
+
+      # --- Build MOMENTUM picklist (API only) ---
       - name: Build picklist (API only, no local data)
         env:
           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
         run: |
+          set -euo pipefail
           python build_picklist_parametric.py \
             --symbols-file backtests/universe_topvol.txt \
             --rsi-min 68 \
@@ -106,12 +114,20 @@ jobs:
             --until "${{ steps.when.outputs.friday }}" \
             --out backtests/picklist_highrsi_trend.csv
 
+          echo "[picklist] head:"
+          sed -n '1,12p' backtests/picklist_highrsi_trend.csv || true
+
       # --- Assert local data never sneaks back ---
       - name: Assert no local dataset present
         run: |
-          test ! -d stock_data_400 && echo "OK: no stock_data_400 directory"
+          if [ -d stock_data_400 ]; then
+            echo "ERROR: stock_data_400 exists (local data directory present)"
+            ls -la stock_data_400 || true
+            exit 1
+          fi
+          echo "OK: no stock_data_400 directory"
 
-      # --- Trend filter ---
+      # --- Trend filter (momentum) ---
       - name: Filter light short-term trend
         env:
           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
@@ -124,7 +140,7 @@ jobs:
             --max-consecutive-down 1 \
             --down-eps 0.002
 
-      # --- Enforce universe ---
+      # --- Enforce universe on picklist (no ranking changes) ---
       - name: Filter picklist by universe
         run: |
           python tools/filter_picklist_by_symbols.py \
@@ -132,7 +148,7 @@ jobs:
             backtests/picklist_highrsi_trend.csv \
             backtests/picklist_highrsi_trend.csv
 
-      # --- Preview Top-K ---
+      # --- Preview Top-K (momentum) ---
       - name: Preview Top-K
         run: |
           python preview_top6.py \
@@ -141,42 +157,96 @@ jobs:
             --week "${{ steps.when.outputs.friday }}" \
             > backtests/top6_preview.txt
 
-      # --- Optional hi70 ---
-      - name: Download hi70 artifact
+          echo "[topk] preview:"
+          sed -n '1,40p' backtests/top6_preview.txt || true
+
+      # --- Optional hi70: download artifact from hi70-scan.yml ---
+      - name: Download hi70 artifact (if available)
         if: always()
         uses: dawidd6/action-download-artifact@v2
         with:
+          repo: ${{ github.repository }}
           workflow: hi70-scan.yml
           workflow_conclusion: success
+          branch: main
           name_is_regexp: true
           name: ^hi70-.*$
           path: backtests
           if_no_artifact_found: warn
 
+      # --- Locate hi70 CSV (set HI70_CSV env if found) ---
+      - name: Locate hi70 CSV
+        id: hi70
+        shell: bash
+        run: |
+          set -euo pipefail
+          CSV="$(find backtests -maxdepth 3 -type f -name 'hi70_thisweek.csv' -print -quit || true)"
+          if [[ -n "$CSV" ]]; then
+            echo "HI70_CSV=$CSV" >> "$GITHUB_ENV"
+            echo "found=1" >> "$GITHUB_OUTPUT"
+            echo "[hi70] found: $CSV"
+            sed -n '1,12p' "$CSV" || true
+          else
+            echo "found=0" >> "$GITHUB_OUTPUT"
+            echo "[hi70] not found."
+          fi
+
+      # --- Filter hi70 results to shared universe (ADV$) ---
+      - name: Filter hi70 to universe (ADV$)
+        if: steps.hi70.outputs.found == '1'
+        run: |
+          python tools/filter_picklist_by_symbols.py \
+            backtests/universe_topvol.txt \
+            "$HI70_CSV" \
+            "$HI70_CSV"
+          echo "[hi70] filtered head:"
+          sed -n '1,12p' "$HI70_CSV" || true
+
+      # --- Build breakout list: Top 6 by market cap from filtered hi70 ---
+      - name: Build breakout list (Top 6 by market cap)
+        if: steps.hi70.outputs.found == '1'
+        env:
+          POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+        run: |
+          set -euo pipefail
+          python tools/select_breakout_top_mcap.py \
+            --in-csv "$HI70_CSV" \
+            --symbol-col symbol \
+            --top 6 \
+            --out backtests/breakout_symbols.txt
+
+          echo "[breakout] breakout_symbols.txt:"
+          cat backtests/breakout_symbols.txt || true
+
+      # --- If no hi70, still create empty breakout_symbols.txt so downstream is predictable ---
+      - name: Ensure breakout_symbols.txt exists (even if hi70 missing)
+        if: steps.hi70.outputs.found != '1'
+        run: |
+          : > backtests/breakout_symbols.txt
+          echo "[breakout] hi70 missing → created empty backtests/breakout_symbols.txt"
+
       # --- Charts + email ---
       - name: Build email assets
         env:
           POLYGON_API_KEY: ${{ secrets.POLYGON_API_KEY }}
+          MPLBACKEND: Agg
         run: |
           python tools/make_email_assets.py \
             --picklist backtests/picklist_highrsi_trend.csv \
             --topk "${{ env.TOPK }}"
 
-      -  name: Email weekly summary (HTML + inline charts)
-         env:
-            SMTP_HOST: smtp.gmail.com
-            SMTP_PORT: "587"
-            SMTP_USER: ${{ secrets.SMTP_USER }}
-            SMTP_PASS: ${{ secrets.SMTP_PASS }}
-            SMTP_FROM: ${{ secrets.SMTP_FROM }}
-            SMTP_TO:   ${{ secrets.SMTP_TO }}
-            EMAIL_SUBJECT: "IW Bot — Weekly Picks ${{ steps.when.outputs.friday }}"
-         run: |
-            python tools/send_weekly_html.py
+      - name: Email weekly summary (HTML + inline charts)
+        env:
+          SMTP_HOST: smtp.gmail.com
+          SMTP_PORT: "587"
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          SMTP_TO:   ${{ secrets.SMTP_TO }}
+          EMAIL_SUBJECT: "IW Bot — Weekly Picks ${{ steps.when.outputs.friday }}"
+        run: python tools/send_weekly_html.py
 
-
-
-
+      # --- Upload artifacts (used by Market Open) ---
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -184,4 +254,6 @@ jobs:
           path: |
             backtests/picklist_highrsi_trend.csv
             backtests/top6_preview.txt
+            backtests/universe_topvol.txt
+            backtests/breakout_symbols.txt
             runner_dates.json
