@@ -2,8 +2,14 @@
 """
 API-only weekly buys (no local CSV / no DATA_DIR).
 
-Inputs:
+Default input:
   backtests/buy_symbols.txt  (one symbol per line)
+
+Supports multiple strategies via env:
+  BUY_LIST_PATH (default: backtests/buy_symbols.txt)
+  STRATEGY      (default: "momentum")
+  WEEK_FRIDAY   (optional, e.g. "2026-01-23" used for reporting/lot tracking)
+  LOTS_OUT      (optional CSV path to append lots, e.g. backtests/momentum_lots.csv)
 
 Env:
   ALPACA_KEY, ALPACA_SECRET
@@ -12,7 +18,8 @@ Env:
 
 Outputs:
   backtests/buy_exec_report.csv
-  backtests/model_symbols.txt   (symbols this model bought/holds this week)
+  backtests/model_symbols.txt   (symbols this bot bought; legacy/optional)
+  LOTS_OUT (if set): CSV rows describing what this strategy bought (symbol + qty)
 """
 
 import os
@@ -21,6 +28,7 @@ import math
 import time
 from pathlib import Path
 from typing import Optional, List, Dict, Any
+
 import requests
 import pandas as pd
 
@@ -32,6 +40,12 @@ ALPACA_KEY    = os.environ.get("ALPACA_KEY", "")
 ALPACA_SECRET = os.environ.get("ALPACA_SECRET", "")
 ALPACA_ENV    = os.environ.get("ALPACA_ENV", "paper").lower()
 NOTIONAL_PER  = float(os.environ.get("NOTIONAL_PER", "0") or "0")
+
+# NEW (patch)
+BUY_LIST_PATH = os.environ.get("BUY_LIST_PATH", "backtests/buy_symbols.txt")
+LOTS_OUT      = os.environ.get("LOTS_OUT", "").strip()
+WEEK_FRIDAY   = os.environ.get("WEEK_FRIDAY", "").strip()
+STRATEGY      = os.environ.get("STRATEGY", "momentum").strip() or "momentum"
 
 HEADERS = {
     "APCA-API-KEY-ID": ALPACA_KEY,
@@ -117,6 +131,22 @@ def append_model_symbols(new_syms: List[str], path: str = "backtests/model_symbo
         existing.add(s)
     p.write_text("\n".join(sorted(existing)) + ("\n" if existing else ""), encoding="utf-8")
 
+def append_lots(lot_rows: List[Dict[str, Any]], lots_path: str) -> None:
+    """
+    Append lot rows to lots_path. Creates file with header if it doesn't exist.
+
+    Expected columns:
+      week_friday, strategy, symbol, qty, order_id
+    """
+    if not lots_path or not lot_rows:
+        return
+    p = Path(lots_path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+
+    df = pd.DataFrame(lot_rows)
+    header = not p.exists()
+    df.to_csv(p, mode="a", header=header, index=False)
+
 def main() -> int:
     if not (ALPACA_KEY and ALPACA_SECRET):
         print("ERROR: Missing ALPACA_KEY/ALPACA_SECRET")
@@ -127,13 +157,16 @@ def main() -> int:
 
     Path("backtests").mkdir(exist_ok=True)
 
-    buy_list = read_symbols("backtests/buy_symbols.txt")
+    buy_list = read_symbols(BUY_LIST_PATH)
     if not buy_list:
-        print("[buy] backtests/buy_symbols.txt empty or missing -> nothing to do")
+        print(f"[buy] {BUY_LIST_PATH} empty or missing -> nothing to do")
         return 0
 
-    rows = []
+    print(f"[buy] strategy={STRATEGY} week_friday={WEEK_FRIDAY or '(unset)'} list={BUY_LIST_PATH} n={len(buy_list)} notional_per={NOTIONAL_PER:.2f}")
+
+    rows: List[Dict[str, Any]] = []
     bought_syms: List[str] = []
+    lot_rows: List[Dict[str, Any]] = []
 
     for sym in buy_list:
         price = resolve_price(sym)
@@ -154,24 +187,37 @@ def main() -> int:
             continue
 
         res = place_market_buy(sym, qty)
-        row = {"symbol": sym, "price_used": price, "qty": qty, **res}
+        row = {"symbol": sym, "price_used": price, "qty": qty, **res, "strategy": STRATEGY, "week_friday": WEEK_FRIDAY}
         rows.append(row)
 
         if res.get("ok"):
             bought_syms.append(sym)
-            print(f"[buy] placed {sym} qty={qty} at est_price={price:.2f} id={res.get('order_id','')}")
+            lot_rows.append({
+                "week_friday": WEEK_FRIDAY,
+                "strategy": STRATEGY,
+                "symbol": sym,
+                "qty": int(qty),
+                "order_id": res.get("order_id", "")
+            })
+            print(f"[buy] placed {sym} qty={qty} est_price={price:.2f} id={res.get('order_id','')}")
         else:
             print(f"[buy] FAILED {sym} qty={qty}: {res.get('status')} {res.get('msg','')}")
 
         time.sleep(0.25)
 
+    # Per-run report (overwrites)
     pd.DataFrame(rows).to_csv("backtests/buy_exec_report.csv", index=False)
 
-    # Track model symbols for later "flatten model only" logic
+    # Legacy: track symbols bought by this automation at least once
     if bought_syms:
         append_model_symbols(bought_syms, "backtests/model_symbols.txt")
 
-    print(f"[buy] done. report=backtests/buy_exec_report.csv, model_symbols={'yes' if bought_syms else 'no'}")
+    # NEW: lot tracking for strategy-specific Friday flatten
+    if LOTS_OUT and lot_rows:
+        append_lots(lot_rows, LOTS_OUT)
+        print(f"[lots] appended {len(lot_rows)} rows -> {LOTS_OUT}")
+
+    print(f"[buy] done. report=backtests/buy_exec_report.csv, bought={len(bought_syms)}")
     return 0
 
 if __name__ == "__main__":
