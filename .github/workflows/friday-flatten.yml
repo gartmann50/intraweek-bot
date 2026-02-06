@@ -61,13 +61,25 @@ jobs:
           path: backtests
           if_no_artifact_found: fail
 
-
+      # ✅ GUARD: refuse to flatten if lots file missing/empty
+      - name: Guard — require momentum lots file
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -s backtests/momentum_lots.csv ]; then
+            echo "ERROR: backtests/momentum_lots.csv missing or empty."
+            echo "Refusing to flatten to avoid accidental behavior."
+            echo "Contents of backtests/:"
+            ls -la backtests || true
+            exit 1
+          fi
+          echo "OK: momentum_lots.csv exists and is non-empty."
 
       - name: Sanity — show downloaded lots
         run: |
           ls -Rlh backtests || true
           echo "=== momentum_lots.csv ==="
-          sed -n '1,40p' backtests/momentum_lots.csv || true
+          sed -n '1,60p' backtests/momentum_lots.csv || true
 
       - name: Show Alpaca positions BEFORE
         run: python tools/open_positions.py
@@ -81,7 +93,7 @@ jobs:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
           ALPACA_ENV:    live
-          FORCE:         ${{ inputs.force }}
+          FORCE:         ${{ github.event.inputs.force || 'false' }}
           WEEK_FRIDAY:   ${{ steps.when.outputs.friday }}
           LOTS_CSV:      backtests/momentum_lots.csv
         run: python tools/flatten_momentum_lots.py
