@@ -8,7 +8,7 @@ on:
     inputs:
       force:
         description: "Flatten immediately (DAY) instead of MOC"
-        required: true
+        required: false
         type: boolean
         default: false
 
