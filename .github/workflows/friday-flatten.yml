@@ -55,9 +55,12 @@ jobs:
         with:
           repo: ${{ github.repository }}
           workflow: market-open.yml
+          branch: main
           workflow_conclusion: success
           name: iw-lots-latest
           path: backtests
+          if_no_artifact_found: fail
+
 
 
       - name: Sanity — show downloaded lots
