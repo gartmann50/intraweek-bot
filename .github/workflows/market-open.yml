@@ -328,16 +328,18 @@ jobs:
         run: python tools/place_weekly_buys.py
 
       # --- Upload weekly lot files (used by Friday flatten to close ONLY momentum qty) ---
-      - name: Upload weekly lots
+      # --- Upload lot files for Friday flatten (LATEST, not date-keyed) ---
+      - name: Upload lots (latest)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: iw-lots-${{ steps.when.outputs.friday }}
+          name: iw-lots-latest
           path: |
             backtests/momentum_lots.csv
             backtests/breakout_lots.csv
             backtests/buy_exec_report.csv
           if-no-files-found: warn
+
 
       # Mark as opened so this week won't buy again (unless force_buy)
       - name: Mark opened
