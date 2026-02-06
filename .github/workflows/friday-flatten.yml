@@ -50,18 +50,15 @@ jobs:
               f.write(f"friday={d}\n")
           print("Anchor Friday:", d)
 
-      - name: Download weekly lots artifact (for this Friday)
+      - name: Download weekly lots artifact (latest)
         uses: dawidd6/action-download-artifact@v2
         with:
           repo: ${{ github.repository }}
           workflow: market-open.yml
-          branch: main
           workflow_conclusion: success
-          search_artifacts: true
-          name_is_regexp: true
-          name: ^iw-lots-${{ steps.when.outputs.friday }}$
+          name: iw-lots-latest
           path: backtests
-          if_no_artifact_found: fail
+
 
       - name: Sanity — show downloaded lots
         run: |
