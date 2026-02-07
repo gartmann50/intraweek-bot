@@ -328,6 +328,23 @@ jobs:
         run: python tools/place_weekly_buys.py
 
       # --- Upload weekly lot files (used by Friday flatten to close ONLY momentum qty) ---
+     
+      - name: Ensure lot/report files exist (even if no buys)
+        if: always()
+        shell: bash
+        run: |
+          set -e
+          mkdir -p backtests
+
+          # minimal headers (must match what flatten script expects; symbol/qty is usually enough)
+          test -f backtests/momentum_lots.csv || echo "symbol,qty" > backtests/momentum_lots.csv
+          test -f backtests/breakout_lots.csv || echo "symbol,qty" > backtests/breakout_lots.csv
+          test -f backtests/buy_exec_report.csv || echo "symbol,status,qty,price_used,order_id,msg" > backtests/buy_exec_report.csv
+
+          ls -la backtests
+
+      
+      
       # --- Upload lot files for Friday flatten (LATEST, not date-keyed) ---
       - name: Upload lots (latest)
         if: always()
@@ -338,7 +355,7 @@ jobs:
             backtests/momentum_lots.csv
             backtests/breakout_lots.csv
             backtests/buy_exec_report.csv
-          if-no-files-found: error
+          if-no-files-found: warn
 
 
       # Mark as opened so this week won't buy again (unless force_buy)
