@@ -338,7 +338,7 @@ jobs:
             backtests/momentum_lots.csv
             backtests/breakout_lots.csv
             backtests/buy_exec_report.csv
-          if-no-files-found: warn
+          if-no-files-found: error
 
 
       # Mark as opened so this week won't buy again (unless force_buy)
