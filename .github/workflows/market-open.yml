@@ -270,7 +270,7 @@ jobs:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
           ALPACA_ENV:    live
-          NOTIONAL_PER:  "5000"
+          NOTIONAL_PER:  "10000"
           BUY_LIST_PATH: "backtests/buy_symbols_momentum.txt"
           LOTS_OUT:      "backtests/momentum_lots.csv"
           WEEK_FRIDAY:   ${{ steps.when.outputs.friday }}
