@@ -283,7 +283,7 @@ jobs:
       # Breakout can overlap momentum: we DO NOT skip held positions (so overlap doubles).
       - name: Prepare BREAKOUT buy list (Top 6 by market cap) — skip only open buys
         id: brklist
-        if: ${{ steps.gate.outputs.go == '1' && steps.buygate.outputs.do == '1' && steps.brk.outputs.found == '1' }}
+        if: false
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
@@ -315,7 +315,7 @@ jobs:
           open(os.environ["GITHUB_OUTPUT"],"a").write(f"any={any_buy}\n")
 
       - name: Execute BREAKOUT buys ($5k each) + write lots
-        if: ${{ steps.gate.outputs.go == '1' && steps.buygate.outputs.do == '1' && steps.brklist.outputs.any == '1' }}
+        if: false
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
