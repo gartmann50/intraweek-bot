@@ -11,10 +11,31 @@ on:
         description: "Force weekly buy now (bypass first-session gate + dup guard)"
         type: boolean
         default: false
+
       topk:
         description: "Top-K momentum buys (default 6)"
         required: false
         default: "6"
+
+      enable_momentum:
+        description: "Enable MOMENTUM strategy"
+        type: boolean
+        default: true
+
+      momentum_notional:
+        description: "MOMENTUM notional per name (USD)"
+        required: false
+        default: "10000"
+
+      enable_breakout:
+        description: "Enable BREAKOUT strategy"
+        type: boolean
+        default: false
+
+      breakout_notional:
+        description: "BREAKOUT notional per name (USD)"
+        required: false
+        default: "5000"
 
 concurrency:
   group: iwbot-open
@@ -28,7 +49,20 @@ jobs:
       actions: read
 
     env:
+      # Top-K only meaningful for momentum
       TOPK: ${{ github.event.inputs.topk || '6' }}
+
+      # Strategy toggles:
+      # - On schedule: momentum ON, breakout OFF (safe)
+      # - On manual: honor inputs
+      ENABLE_MOMENTUM: ${{ github.event_name == 'schedule' && 'true' || (github.event.inputs.enable_momentum == 'true' && 'true' || 'false') }}
+      ENABLE_BREAKOUT: ${{ github.event_name == 'schedule' && 'false' || (github.event.inputs.enable_breakout == 'true' && 'true' || 'false') }}
+
+      # Notional sizing:
+      # - On schedule: defaults (momentum 10k, breakout 5k)
+      # - On manual: honor inputs
+      MOMENTUM_NOTIONAL: ${{ github.event_name == 'schedule' && '10000' || (github.event.inputs.momentum_notional || '10000') }}
+      BREAKOUT_NOTIONAL: ${{ github.event_name == 'schedule' && '5000'  || (github.event.inputs.breakout_notional || '5000') }}
 
     steps:
       - uses: actions/checkout@v4
@@ -41,6 +75,15 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install pandas numpy requests
+
+      - name: Show config (toggles + sizing)
+        run: |
+          echo "ENABLE_MOMENTUM=${{ env.ENABLE_MOMENTUM }}"
+          echo "ENABLE_BREAKOUT=${{ env.ENABLE_BREAKOUT }}"
+          echo "MOMENTUM_NOTIONAL=${{ env.MOMENTUM_NOTIONAL }}"
+          echo "BREAKOUT_NOTIONAL=${{ env.BREAKOUT_NOTIONAL }}"
+          echo "TOPK=${{ env.TOPK }}"
+          echo "force_buy=${{ github.event.inputs.force_buy }}"
 
       # --- Compute last Friday (NY) ---
       - name: When (NY)
@@ -102,7 +145,7 @@ jobs:
           find backtests -maxdepth 3 -type f -print || true
           exit 1
 
-      # --- Normalize breakout symbols (optional; breakout will be skipped if missing) ---
+      # --- Normalize breakout symbols (optional) ---
       - name: Normalize breakout symbols (optional)
         id: brk
         shell: bash
@@ -116,7 +159,7 @@ jobs:
             sed -n '1,15p' backtests/breakout_symbols.txt || true
           else
             echo "found=0" >> "$GITHUB_OUTPUT"
-            echo "No breakout_symbols.txt found in weekly artifact (breakout buys will be skipped)."
+            echo "No breakout_symbols.txt found in weekly artifact."
           fi
 
       - name: Derive WEEK from picklist (export)
@@ -207,11 +250,11 @@ jobs:
           print("first:", first, "today:", today, "BUY=", do)
 
       # ======================
-      # MOMENTUM BUY LIST
+      # MOMENTUM
       # ======================
       - name: Prepare MOMENTUM buy list (Top-K) — skip held / open buys
         id: momlist
-        if: ${{ steps.gate.outputs.go == '1' && steps.buygate.outputs.do == '1' }}
+        if: ${{ env.ENABLE_MOMENTUM == 'true' && steps.gate.outputs.go == '1' && steps.buygate.outputs.do == '1' }}
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
@@ -264,13 +307,14 @@ jobs:
           print("Filtered momentum:", filtered)
           open(os.environ["GITHUB_OUTPUT"],"a").write(f"any={any_buy}\n")
 
-      - name: Execute MOMENTUM buys ($5k each) + write lots
-        if: ${{ steps.gate.outputs.go == '1' && steps.buygate.outputs.do == '1' && steps.momlist.outputs.any == '1' }}
+      - name: Execute MOMENTUM buys (notional per name) + write lots
+        id: mombuy
+        if: ${{ env.ENABLE_MOMENTUM == 'true' && steps.gate.outputs.go == '1' && steps.buygate.outputs.do == '1' && steps.momlist.outputs.any == '1' }}
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
           ALPACA_ENV:    live
-          NOTIONAL_PER:  "10000"
+          NOTIONAL_PER:  ${{ env.MOMENTUM_NOTIONAL }}
           BUY_LIST_PATH: "backtests/buy_symbols_momentum.txt"
           LOTS_OUT:      "backtests/momentum_lots.csv"
           WEEK_FRIDAY:   ${{ steps.when.outputs.friday }}
@@ -278,12 +322,11 @@ jobs:
         run: python tools/place_weekly_buys.py
 
       # ======================
-      # BREAKOUT BUY LIST
+      # BREAKOUT
       # ======================
-      # Breakout can overlap momentum: we DO NOT skip held positions (so overlap doubles).
       - name: Prepare BREAKOUT buy list (Top 6 by market cap) — skip only open buys
         id: brklist
-        if: false
+        if: ${{ env.ENABLE_BREAKOUT == 'true' && steps.gate.outputs.go == '1' && steps.buygate.outputs.do == '1' && steps.brk.outputs.found == '1' }}
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
@@ -314,38 +357,33 @@ jobs:
           print("Filtered breakout:", filtered)
           open(os.environ["GITHUB_OUTPUT"],"a").write(f"any={any_buy}\n")
 
-      - name: Execute BREAKOUT buys ($5k each) + write lots
-        if: false
+      - name: Execute BREAKOUT buys (notional per name) + write lots
+        id: brkbuy
+        if: ${{ env.ENABLE_BREAKOUT == 'true' && steps.gate.outputs.go == '1' && steps.buygate.outputs.do == '1' && steps.brklist.outputs.any == '1' }}
         env:
           ALPACA_KEY:    ${{ secrets.ALPACA_KEY }}
           ALPACA_SECRET: ${{ secrets.ALPACA_SECRET }}
           ALPACA_ENV:    live
-          NOTIONAL_PER:  "5000"
+          NOTIONAL_PER:  ${{ env.BREAKOUT_NOTIONAL }}
           BUY_LIST_PATH: "backtests/buy_symbols_breakout.txt"
           LOTS_OUT:      "backtests/breakout_lots.csv"
           WEEK_FRIDAY:   ${{ steps.when.outputs.friday }}
           STRATEGY:      "breakout"
         run: python tools/place_weekly_buys.py
 
-      # --- Upload weekly lot files (used by Friday flatten to close ONLY momentum qty) ---
-     
+      # --- Ensure lot/report files exist (even if no buys) ---
       - name: Ensure lot/report files exist (even if no buys)
         if: always()
         shell: bash
         run: |
           set -e
           mkdir -p backtests
-
-          # minimal headers (must match what flatten script expects; symbol/qty is usually enough)
           test -f backtests/momentum_lots.csv || echo "symbol,qty" > backtests/momentum_lots.csv
           test -f backtests/breakout_lots.csv || echo "symbol,qty" > backtests/breakout_lots.csv
           test -f backtests/buy_exec_report.csv || echo "symbol,status,qty,price_used,order_id,msg" > backtests/buy_exec_report.csv
-
           ls -la backtests
 
-      
-      
-      # --- Upload lot files for Friday flatten (LATEST, not date-keyed) ---
+      # --- Upload lot files for Friday flatten (LATEST) ---
       - name: Upload lots (latest)
         if: always()
         uses: actions/upload-artifact@v4
@@ -357,8 +395,7 @@ jobs:
             backtests/buy_exec_report.csv
           if-no-files-found: warn
 
-
-      # Mark as opened so this week won't buy again (unless force_buy)
+      # Mark as opened only if at least one strategy actually had buys
       - name: Mark opened
         if: ${{ steps.gate.outputs.go == '1' && steps.buygate.outputs.do == '1' && (steps.momlist.outputs.any == '1' || steps.brklist.outputs.any == '1') }}
         run: mkdir -p .open-flag && date > .open-flag/ok
